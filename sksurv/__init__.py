@@ -17,9 +17,10 @@ def _get_version(name):
 
 
 def show_versions():
+    """Print debugging information."""
     sys_info = {
         "Platform": platform.platform(),
-        "Python version": f"{platform.python_implementation()} {platform}",
+        "Python version": f"{platform.python_implementation()} {platform.python_version()}",
         "Python interpreter": sys.executable,
     }
 
@@ -44,7 +45,7 @@ def show_versions():
         max(map(len, deps)),
         max(map(len, sys_info.keys())),
     )
-    fmt = "{0:<%ds}: {1}" % minwidth
+    fmt = f"{{0:<{minwidth}s}}: {{1}}"
 
     print("SYSTEM")
     print("------")
@@ -60,14 +61,15 @@ def show_versions():
 
 @available_if(_final_estimator_has("predict_cumulative_hazard_function"))
 def predict_cumulative_hazard_function(self, X, **kwargs):
-    """Predict cumulative hazard function.
+    r"""
+    Predict cumulative hazard function for a pipeline.
 
     The cumulative hazard function for an individual
     with feature vector :math:`x` is defined as
 
     .. math::
 
-        H(t \\mid x) = \\exp(x^\\top \\beta) H_0(t) ,
+        H(t \mid x) = \exp(x^\top \beta) H_0(t) ,
 
     where :math:`H_0(t)` is the baseline hazard function,
     estimated by Breslow's estimator.
@@ -79,8 +81,30 @@ def predict_cumulative_hazard_function(self, X, **kwargs):
 
     Returns
     -------
-    cum_hazard : ndarray, shape = (n_samples,)
-        Predicted cumulative hazard functions.
+    ndarray, shape = (n_samples,)
+        Predicted cumulative hazard functions. Each element is an instance
+        of :class:`sksurv.functions.StepFunction`.
+
+    See Also
+    --------
+    predict_survival_function : Predict survival function for a pipeline.
+
+    Examples
+    --------
+    >>> from sksurv.datasets import load_whas500
+    >>> from sksurv.linear_model import CoxPHSurvivalAnalysis
+    >>> from sksurv.preprocessing import OneHotEncoder
+    >>> from sklearn.pipeline import Pipeline
+    >>>
+    >>> X, y = load_whas500()
+    >>> pipe = Pipeline([('encode', OneHotEncoder()),
+    ...                  ('cox', CoxPHSurvivalAnalysis())])
+    >>> pipe.fit(X, y)
+    Pipeline(...)
+    >>> chf = pipe.predict_cumulative_hazard_function(X.iloc[:5])
+    >>> for fn in chf:
+    ...     print(fn.x, fn.y)
+    [...]
     """
     Xt = X
     for _, _, transform in self._iter(with_final=False):
@@ -90,14 +114,15 @@ def predict_cumulative_hazard_function(self, X, **kwargs):
 
 @available_if(_final_estimator_has("predict_survival_function"))
 def predict_survival_function(self, X, **kwargs):
-    """Predict survival function.
+    r"""
+    Predict survival function for a pipeline.
 
     The survival function for an individual
     with feature vector :math:`x` is defined as
 
     .. math::
 
-        S(t \\mid x) = S_0(t)^{\\exp(x^\\top \\beta)} ,
+        S(t \mid x) = S_0(t)^{\exp(x^\top \beta)} ,
 
     where :math:`S_0(t)` is the baseline survival function,
     estimated by Breslow's estimator.
@@ -109,8 +134,30 @@ def predict_survival_function(self, X, **kwargs):
 
     Returns
     -------
-    survival : ndarray, shape = (n_samples,)
-        Predicted survival functions.
+    ndarray, shape = (n_samples,)
+        Predicted survival functions. Each element is an instance
+        of :class:`sksurv.functions.StepFunction`.
+
+    See Also
+    --------
+    predict_cumulative_hazard_function : Predict cumulative hazard function for a pipeline.
+
+    Examples
+    --------
+    >>> from sksurv.datasets import load_whas500
+    >>> from sksurv.linear_model import CoxPHSurvivalAnalysis
+    >>> from sksurv.preprocessing import OneHotEncoder
+    >>> from sklearn.pipeline import Pipeline
+    >>>
+    >>> X, y = load_whas500()
+    >>> pipe = Pipeline([('encode', OneHotEncoder()),
+    ...                  ('cox', CoxPHSurvivalAnalysis())])
+    >>> pipe.fit(X, y)
+    Pipeline(...)
+    >>> surv_fn = pipe.predict_survival_function(X.iloc[:5])
+    >>> for fn in surv_fn:
+    ...     print(fn.x, fn.y)
+    [...]
     """
     Xt = X
     for _, _, transform in self._iter(with_final=False):

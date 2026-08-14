@@ -31,9 +31,9 @@ this unique characteristic of such a dataset into account.
         :link-type: doc
 
         The easiest way to install scikit-survival is to use
-        `Anaconda <https://www.anaconda.com/distribution/>`_ by running::
+        `conda-forge <https://conda-forge.org/download/>`_ by running::
 
-          conda install -c sebp scikit-survival
+          conda install -c conda-forge scikit-survival
 
         Alternatively, you can install scikit-survival from source
         following :ref:`this guide <install-from-source>`.

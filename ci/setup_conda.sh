@@ -1,59 +1,94 @@
 #!/bin/bash
+set -euo pipefail
 
-RUNNER_OS="${1}"
-RUNNER_ARCH="${2}"
-CONDA_PKGS_DIR="${3}"
+DEPS_VERSION="${1}"
+RUNNER_OS="${2}"
+RUNNER_ARCH="${3}"
+CONDA_PKGS_DIR="${4}"
 
 run_check_sha() {
     echo "${1}" | shasum -a 256 --check --strict -
 }
 
-if [[ "${CONDA:-}" = "" ]]; then
+if [[ -z "${MINIFORGE:-}" ]]; then
     # download and install conda
-    MINICONDA_VERSION="Miniconda3-py312_24.1.2-0"
+    MINIFORGE_VERSION="25.3.1-0"
 
     if [[ "${RUNNER_OS}" = "macOS" ]] && [[ "${RUNNER_ARCH}" = "ARM64" ]]; then
-        MINICONDA_VERSION="${MINICONDA_VERSION}-MacOSX-arm64"
-        MINICONDA_HASH="1c277b1ec046fd1b628390994e3fa3dbac0e364f44cd98b915daaa67a326c66a"
+        MINIFORGE_FILENAME="${MINIFORGE_VERSION}-MacOSX-arm64"
+        MINIFORGE_HASH="d9eabd1868030589a1d74017b8723b01cf81b5fec1b9da8021b6fa44be7bbeae"
     elif [[ "${RUNNER_OS}" = "macOS" ]] && [[ "${RUNNER_ARCH}" = "X64" ]]; then
-        MINICONDA_VERSION="${MINICONDA_VERSION}-MacOSX-x86_64"
-        MINICONDA_HASH="bc45a2ceea9341579532847cc9f29a9769d60f12e306bba7f0de6ad5acdd73e9"
+        MINIFORGE_FILENAME="${MINIFORGE_VERSION}-MacOSX-x86_64"
+        MINIFORGE_HASH="6c09a3550bb65bdb6d3db6f6c2b890b987b57189f3b71c67a5af49943d2522e8"
     elif [[ "${RUNNER_OS}" = "Linux" ]] && [[ "${RUNNER_ARCH}" = "X64" ]]; then
-        MINICONDA_VERSION="${MINICONDA_VERSION}-Linux-x86_64"
-        MINICONDA_HASH="b978856ec3c826eb495b60e3fffe621f670c101150ebcbdeede4f961f22dc438"
+        MINIFORGE_FILENAME="${MINIFORGE_VERSION}-Linux-x86_64"
+        MINIFORGE_HASH="376b160ed8130820db0ab0f3826ac1fc85923647f75c1b8231166e3d559ab768"
     else
         echo "Unsupported OS or ARCH: ${RUNNER_OS} ${RUNNER_ARCH}"
         exit 1
     fi
 
-    export CONDA="${GITHUB_WORKSPACE}/miniconda3"
+    export MINIFORGE="${GITHUB_WORKSPACE}/miniforge"
 
-    mkdir -p "${CONDA}" && \
-    curl "https://repo.anaconda.com/miniconda/${MINICONDA_VERSION}.sh" -o "${CONDA}/miniconda.sh" && \
-    run_check_sha "${MINICONDA_HASH}  ${CONDA}/miniconda.sh" && \
-    bash "${CONDA}/miniconda.sh" -b -u -p "${CONDA}" && \
-    rm -rf "${CONDA}/miniconda.sh" || exit 1
+    echo "::group::🔽 Downloading Miniforge installer..."
+    mkdir -p "${MINIFORGE}"
+    curl --fail -L \
+        "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_FILENAME}.sh" \
+        -o "${MINIFORGE}/miniforge.sh"
+    echo "::endgroup::"
 
-    echo "CONDA=${CONDA}" >> "${GITHUB_ENV}"
+    echo "::group::🧐 Verifying installer hash..."
+    run_check_sha "${MINIFORGE_HASH}  ${MINIFORGE}/miniforge.sh"
+    echo "::endgroup::"
+
+    echo "::group::🏗️ Installing Miniforge to ${MINIFORGE}..."
+    bash "${MINIFORGE}/miniforge.sh" -b -u -p "${MINIFORGE}"
+    rm -rf "${MINIFORGE}/miniforge.sh"
+    echo "::endgroup::"
+
+    echo "MINIFORGE=${MINIFORGE}" >> "${GITHUB_ENV}"
 fi
-
-"${CONDA}/bin/conda" config --set always_yes yes && \
-"${CONDA}/bin/conda" config --set changeps1 no && \
-"${CONDA}/bin/conda" config --set auto_update_conda false && \
-"${CONDA}/bin/conda" config --set show_channel_urls true || \
-exit 1
 
 # The directory in which packages are located.
 # https://docs.conda.io/projects/conda/en/latest/user-guide/configuration/settings.html#pkgs-dirs-specify-package-directories
+# Note: sudo chown is unnecessary in GitHub Actions environments as the runner user has permissions.
 if [[ ! -d "${CONDA_PKGS_DIR}" ]]; then
-    mkdir -p "${CONDA_PKGS_DIR}" || exit 1
+    mkdir -p "${CONDA_PKGS_DIR}"
 fi
-sudo chown -R "${USER}" "${CONDA_PKGS_DIR}" || \
-exit 1
 
-sudo "${CONDA}/bin/conda" update -q -n base conda && \
-sudo chown -R "${USER}" "${CONDA}" || \
-exit 1
+# Configure conda
+echo "🔧 Configuring conda..."
+"${MINIFORGE}/bin/conda" config --set always_yes yes
+"${MINIFORGE}/bin/conda" config --set changeps1 no
+"${MINIFORGE}/bin/conda" config --set auto_update_conda false
+"${MINIFORGE}/bin/conda" config --set show_channel_urls true
 
-export PATH="${CONDA}/bin:${PATH}"
-echo "${CONDA}/bin" >> "${GITHUB_PATH}"
+# check whether the script is executed on GitHub Actions
+if [[ -n "${CI:-}" ]]; then
+echo "🌐 Updating Path environment variable..."
+export PATH="${MINIFORGE}/bin:${PATH}"
+echo "${MINIFORGE}/bin" >> "${GITHUB_PATH}"
+fi
+
+echo "::group::🎉 Conda installation and configuration complete."
+"${MINIFORGE}/bin/conda" config --show-sources
+# Useful for debugging any issues with conda
+"${MINIFORGE}/bin/mamba" info
+echo "::endgroup::"
+
+echo "::group::✨ Create conda environment..."
+source "ci/deps/${DEPS_VERSION:?}.sh"
+python ci/render-requirements.py ci/deps/requirements.yaml.tmpl > environment.yaml
+
+mamba env create -n sksurv-test --file environment.yaml
+
+echo "numpy ${CI_NUMPY_VERSION:?}" > "${MINIFORGE:?}/envs/sksurv-test/conda-meta/pinned"
+echo "pandas ${CI_PANDAS_VERSION:?}" >> "${MINIFORGE:?}/envs/sksurv-test/conda-meta/pinned"
+echo "scikit-learn ${CI_SKLEARN_VERSION:?}" >> "${MINIFORGE:?}/envs/sksurv-test/conda-meta/pinned"
+
+# delete any version that is already installed.
+# use '|| true' to ensure script continues even if package is not found.
+mamba run -n sksurv-test pip uninstall --yes scikit-survival || true
+
+mamba list -n sksurv-test
+echo "::endgroup::"

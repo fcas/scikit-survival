@@ -3,6 +3,7 @@ from numpy.testing import assert_array_almost_equal, assert_array_equal
 import pandas as pd
 import pytest
 from sklearn.base import BaseEstimator
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.datasets import load_iris
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
@@ -42,16 +43,16 @@ def dummy_data():
 
 @pytest.fixture()
 def iris_data_with_estimator():
-    def _make_estimator(**params):
+    def _make_estimator():
         data = load_iris()
         x = data["data"]
         y = data["target"]
 
         meta = Stacking(
-            LogisticRegression(**params),
+            LogisticRegression(solver="lbfgs"),
             [
                 ("tree", DecisionTreeClassifier(max_depth=1, random_state=0)),
-                ("svm", SVC(probability=True, gamma="auto", random_state=0)),
+                ("svm", CalibratedClassifierCV(SVC(gamma="auto", random_state=0), ensemble=False)),
             ],
         )
         return x, y, meta
@@ -104,7 +105,7 @@ class TestStackingClassifier:
 
     @staticmethod
     def test_fit(iris_data_with_estimator):
-        x, y, meta = iris_data_with_estimator(solver="liblinear", multi_class="ovr")
+        x, y, meta = iris_data_with_estimator()
         assert 2 == len(meta)
         meta.fit(x, y)
 
@@ -115,9 +116,9 @@ class TestStackingClassifier:
 
     @staticmethod
     def test_fit_sample_weights(iris_data_with_estimator):
-        x, y, meta = iris_data_with_estimator(solver="liblinear", multi_class="ovr")
+        x, y, meta = iris_data_with_estimator()
 
-        sample_weight = np.random.RandomState(0).uniform(size=x.shape[0])
+        sample_weight = np.random.default_rng(0).uniform(size=x.shape[0])
         meta.fit(x, y, tree__sample_weight=sample_weight, svm__sample_weight=sample_weight)
 
     @staticmethod
@@ -147,7 +148,7 @@ class TestStackingClassifier:
 
     @staticmethod
     def test_predict(iris_data_with_estimator):
-        x, y, meta = iris_data_with_estimator(multi_class="multinomial", solver="lbfgs")
+        x, y, meta = iris_data_with_estimator()
         assert 2 == len(meta)
         meta.fit(x, y)
         p = meta.predict(x)
@@ -158,7 +159,7 @@ class TestStackingClassifier:
     @staticmethod
     @pytest.mark.parametrize("method", ["predict_proba", "predict_log_proba"])
     def test_predict_proba(iris_data_with_estimator, method):
-        x, y, meta = iris_data_with_estimator(multi_class="multinomial", solver="lbfgs")
+        x, y, meta = iris_data_with_estimator()
         meta.fit(x, y)
         p = getattr(meta, method)(x)
 
@@ -166,7 +167,7 @@ class TestStackingClassifier:
         for i, c in enumerate(meta.meta_estimator.classes_):
             scores[i] = roc_auc_score(np.asarray(y == c, dtype=int), p[:, i])
 
-        assert_array_almost_equal(np.array([1.0, 0.9986, 0.9986]), scores)
+        assert_array_almost_equal(np.array([1.0, 0.9982, 0.9982]), scores)
 
     @staticmethod
     def test_feature_names_in():
@@ -178,14 +179,14 @@ class TestStackingClassifier:
             LogisticRegression(),
             [
                 ("tree", DecisionTreeClassifier(max_depth=1, random_state=0)),
-                ("svm", SVC(probability=True, gamma="auto", random_state=0)),
+                ("svm", CalibratedClassifierCV(SVC(gamma="auto", random_state=0), ensemble=False)),
             ],
         )
         meta.fit(x, y)
         assert meta.n_features_in_ == len(data["feature_names"])
         assert_array_equal(meta.feature_names_in_, data["feature_names"])
 
-        meta.fit(x.values, y)
+        meta.fit(x.to_numpy(), y)
         assert meta.n_features_in_ == len(data["feature_names"])
         with pytest.raises(AttributeError, match="'Stacking' object has no attribute 'feature_names_in_'"):
             meta.feature_names_in_  # pylint: disable=pointless-statement
@@ -312,9 +313,9 @@ class TestStackingSurvivalAnalysis:
             probabilities=False,
         )
         meta.fit(whas500.x_data_frame, whas500.y)
-        names = whas500.x_data_frame.columns.values
+        names = whas500.x_data_frame.columns.to_numpy()
         assert meta.n_features_in_ == len(names)
-        assert_array_equal(meta.feature_names_in_, names)
+        assert_array_equal(meta.feature_names_in_, names, strict=True)
 
         meta.fit(whas500.x, whas500.y)
         assert meta.n_features_in_ == len(names)

@@ -1,13 +1,16 @@
 from os.path import dirname, join
+import re
 
 import numpy as np
-from numpy.testing import assert_array_almost_equal, assert_array_equal
+from numpy.testing import assert_allclose, assert_array_almost_equal, assert_array_equal
 import pandas as pd
 import pytest
 
+from sksurv.datasets import load_bmt, load_cgvhd
 from sksurv.nonparametric import (
     CensoringDistributionEstimator,
     SurvivalFunctionEstimator,
+    cumulative_incidence_competing_risks,
     kaplan_meier_estimator,
     nelson_aalen_estimator,
 )
@@ -17,6 +20,9 @@ from sksurv.util import Surv
 CHANNING_FILE = join(dirname(__file__), "data", "channing.csv")
 AIDS_CHILDREN_FILE = join(dirname(__file__), "data", "Lagakos_AIDS_children.csv")
 AIDS_ADULTS_FILE = join(dirname(__file__), "data", "Lagakos_AIDS_adults.csv")
+CGVHD_AALEN_FILE = join(dirname(__file__), "data", "cgvhd_aalen.npy")
+CGVHD_DELTA_FILE = join(dirname(__file__), "data", "cgvhd_delta.npy")
+CGVHD_DINSE_FILE = join(dirname(__file__), "data", "cgvhd_dinse.npy")
 
 
 class SimpleDataKMCases(FixtureParameterFactory):
@@ -1920,9 +1926,9 @@ class Whas500CIData(FixtureParameterFactory):
 def make_channing():
     def _make_channing(sex):  # pylint: disable=unused-argument
         data = pd.read_csv(CHANNING_FILE).query("entry < exit and sex == @sex")
-        time_enter_m = data.loc[:, "entry"].values
-        time_exit_m = data.loc[:, "exit"].values
-        event_m = data.loc[:, "cens"].values == 1
+        time_enter_m = data.loc[:, "entry"].to_numpy()
+        time_exit_m = data.loc[:, "exit"].to_numpy()
+        event_m = data.loc[:, "cens"].to_numpy() == 1
         return time_enter_m, time_exit_m, event_m
 
     return _make_channing
@@ -2398,7 +2404,7 @@ def make_aids():
 
 @pytest.fixture()
 def truncated_failure_data():
-    rnd = np.random.RandomState(2016)
+    rnd = np.random.default_rng(2016)
     time_exit = rnd.uniform(1, 100, size=25)
     time_enter = time_exit + 1
     event = rnd.binomial(1, 0.6, size=25).astype(bool)
@@ -2409,7 +2415,8 @@ def truncated_failure_data():
 def random_survival_data():
     event = np.ones(10, dtype=bool)
     event[:5] = False
-    return Surv.from_arrays(event=event, time=np.random.rand(10))
+    rng = np.random.default_rng()
+    return Surv.from_arrays(event=event, time=rng.random(10))
 
 
 @pytest.fixture()
@@ -2846,8 +2853,13 @@ class TestKaplanMeier:
         with pytest.raises(ValueError, match="dtype='numeric' is not compatible with arrays of bytes/strings"):
             est.predict_proba(np.array(["should", "not", "work"]))
 
-        with pytest.raises(ValueError, match=r"Found array with dim 3\. SurvivalFunctionEstimator expected <= 2\."):
-            est.predict_proba(np.random.randn(10, 9, 5))
+        rng = np.random.default_rng()
+        with pytest.raises(
+            ValueError,
+            match=r"Found array with dim 3(\. SurvivalFunctionEstimator expected <= 2"
+            r"|, while dim <= 2 is required by SurvivalFunctionEstimator)\.",
+        ):
+            est.predict_proba(rng.standard_normal((10, 9, 5)))
 
     @staticmethod
     @pytest.mark.parametrize("conf_level", [None, -1, 1.0, 3.0, np.inf, np.nan])
@@ -5505,7 +5517,7 @@ class TestKaplanMeier:
     def test_right_truncated_children(make_aids):
         event, time_enter, time_exit = make_aids("children")
 
-        x, y, km_ci = kaplan_meier_estimator(event, time_exit.values, time_enter.values, conf_type="log-log")
+        x, y, km_ci = kaplan_meier_estimator(event, time_exit.to_numpy(), time_enter.to_numpy(), conf_type="log-log")
         true_x = np.array(
             [
                 7.75,
@@ -5629,7 +5641,7 @@ class TestKaplanMeier:
     def test_right_truncated_adults(make_aids):
         event, time_enter, time_exit = make_aids("adults")
 
-        x, y, km_ci = kaplan_meier_estimator(event, time_exit.values, time_enter.values, conf_type="log-log")
+        x, y, km_ci = kaplan_meier_estimator(event, time_exit.to_numpy(), time_enter.to_numpy(), conf_type="log-log")
 
         true_x = np.array(
             [
@@ -6231,3 +6243,402 @@ class TestNelsonAalen:
         )
 
         assert_array_almost_equal(y, true_y)
+
+
+class SimpleDataBMTCases(FixtureParameterFactory):
+    def _load(self, dis=None):
+        dis_df, bmt = load_bmt()
+        event = bmt["status"]
+        time = bmt["ftime"]
+        if dis is not None:
+            dis_np = dis_df["dis"].to_numpy()
+            dis_filter = dis_np == dis
+            event = event[dis_filter]
+            time = time[dis_filter]
+        return event, time
+
+    def data_bmt_full(self):
+        event, time = self._load()
+
+        true_x = np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 22, 26, 32, 35, 67, 68, 70, 72])
+        true_y = np.array(
+            [
+                [0.02857143, 0.02857143],
+                [0.05714286, 0.05714286],
+                [0.05714286, 0.08571429],
+                [0.14581281, 0.11527094],
+                [0.20492611, 0.14482759],
+                [0.20492611, 0.1757917],
+                [0.20492611, 0.23771992],
+                [0.23771164, 0.27050544],
+                [0.23771164, 0.30563279],
+                [0.23771164, 0.34076015],
+                [0.27283899, 0.34076015],
+                [0.27283899, 0.3758875],
+                [0.27283899, 0.41101485],
+                [0.27283899, 0.4461422],
+                [0.27283899, 0.48126955],
+                [0.27283899, 0.48126955],
+                [0.27283899, 0.48126955],
+                [0.27283899, 0.48126955],
+                [0.27283899, 0.48126955],
+                [0.27283899, 0.48126955],
+                [0.27283899, 0.48126955],
+            ]
+        ).T
+
+        return event, time, true_x, true_y
+
+    def data_bmt_total_risk(self):
+        event, time = self._load(dis="0")
+
+        true_x = np.array([0, 1, 3, 4, 5, 7, 8, 9, 12, 13, 14, 22, 26, 35, 72])
+        true_y = np.array(
+            [
+                [0.05882353, 0.05882353],
+                [0.11764706, 0.11764706],
+                [0.11764706, 0.17647059],
+                [0.11764706, 0.23529412],
+                [0.11764706, 0.29411765],
+                [0.11764706, 0.35294118],
+                [0.11764706, 0.41176471],
+                [0.11764706, 0.47058824],
+                [0.17647059, 0.47058824],
+                [0.17647059, 0.52941176],
+                [0.17647059, 0.58823529],
+                [0.17647059, 0.64705882],
+                [0.17647059, 0.70588235],
+                [0.17647059, 0.70588235],
+                [0.17647059, 0.70588235],
+            ]
+        ).T
+
+        return event, time, true_x, true_y
+
+    def data_bmt_AML(self):
+        event, time = self._load(dis="1")
+
+        true_x = np.array([2, 3, 4, 7, 8, 10, 32, 35, 67, 68, 70])
+        true_y = np.array(
+            [
+                [0.0, 0.05555556],
+                [0.17708333, 0.05555556],
+                [0.29513889, 0.05555556],
+                [0.29513889, 0.12048611],
+                [0.36818576, 0.12048611],
+                [0.36818576, 0.20570747],
+                [0.36818576, 0.20570747],
+                [0.36818576, 0.20570747],
+                [0.36818576, 0.20570747],
+                [0.36818576, 0.20570747],
+                [0.36818576, 0.20570747],
+            ]
+        ).T
+
+        return event, time, true_x, true_y
+
+    @staticmethod
+    def data_three_competing_cases():
+        time = np.array(
+            [
+                5.3,
+                10.2,
+                4.5,
+                12.7,
+                7.4,
+                8.6,
+                9.1,
+                3.3,
+                6.9,
+                11.5,
+                15.2,
+                13.1,
+                10.0,
+                5.9,
+                8.2,
+                4.3,
+                6.1,
+                14.7,
+                16.9,
+                3.7,
+                5.0,
+                7.8,
+                9.5,
+                11.9,
+                10.6,
+                6.4,
+                4.8,
+                12.3,
+                14.0,
+            ]
+        )
+
+        event = np.array([1, 0, 3, 0, 2, 3, 0, 1, 3, 0, 1, 0, 3, 0, 2, 0, 0, 3, 0, 1, 0, 3, 1, 0, 2, 0, 3, 2, 0])
+        true_x = np.array(
+            [
+                3.3,
+                3.7,
+                4.3,
+                4.5,
+                4.8,
+                5.0,
+                5.3,
+                5.9,
+                6.1,
+                6.4,
+                6.9,
+                7.4,
+                7.8,
+                8.2,
+                8.6,
+                9.1,
+                9.5,
+                10.0,
+                10.2,
+                10.6,
+                11.5,
+                11.9,
+                12.3,
+                12.7,
+                13.1,
+                14.0,
+                14.7,
+                15.2,
+                16.9,
+            ]
+        )
+        true_y = np.array(
+            [
+                [
+                    0.03448276,
+                    0.06896552,
+                    0.06896552,
+                    0.06896552,
+                    0.06896552,
+                    0.06896552,
+                    0.10633145,
+                    0.10633145,
+                    0.10633145,
+                    0.10633145,
+                    0.10633145,
+                    0.10633145,
+                    0.10633145,
+                    0.10633145,
+                    0.10633145,
+                    0.10633145,
+                    0.15292541,
+                    0.15292541,
+                    0.15292541,
+                    0.15292541,
+                    0.15292541,
+                    0.15292541,
+                    0.15292541,
+                    0.15292541,
+                    0.15292541,
+                    0.15292541,
+                    0.15292541,
+                    0.28471974,
+                    0.28471974,
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.04326582,
+                    0.04326582,
+                    0.08653163,
+                    0.08653163,
+                    0.08653163,
+                    0.08653163,
+                    0.08653163,
+                    0.08653163,
+                    0.13778498,
+                    0.13778498,
+                    0.13778498,
+                    0.20368215,
+                    0.20368215,
+                    0.20368215,
+                    0.20368215,
+                    0.20368215,
+                    0.20368215,
+                    0.20368215,
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.03580902,
+                    0.07161804,
+                    0.07161804,
+                    0.07161804,
+                    0.07161804,
+                    0.07161804,
+                    0.07161804,
+                    0.11488385,
+                    0.11488385,
+                    0.15814967,
+                    0.15814967,
+                    0.20141549,
+                    0.20141549,
+                    0.20141549,
+                    0.24800944,
+                    0.24800944,
+                    0.24800944,
+                    0.24800944,
+                    0.24800944,
+                    0.24800944,
+                    0.24800944,
+                    0.24800944,
+                    0.24800944,
+                    0.37980378,
+                    0.37980378,
+                    0.37980378,
+                ],
+            ]
+        )
+
+        return event, time, true_x, true_y
+
+
+class CGVHD_DataSets(FixtureParameterFactory):
+    """The true CI values for Aalen and Delta_Approx were generated using
+    the proc lifetest statement in SAS.
+    https://support.sas.com/documentation/onlinedoc/stat/ex_code/143/liftcrsk.html
+
+    Because an external implementation of the exact Dinse variance has not been found,
+    the true CI values are taken from this internal code. Thus, this serves as a regression test.
+    """
+
+    @staticmethod
+    def data_cgvhd_factory():
+        def _load_cgvhd(var_type=None):
+            _, df = load_cgvhd()
+            event, ftime = df["status"], df["ftime"]
+
+            if var_type == "Aalen":
+                expected_file = CGVHD_AALEN_FILE
+            elif var_type == "Dinse_Approx":
+                expected_file = CGVHD_DELTA_FILE
+            elif var_type == "Dinse":
+                expected_file = CGVHD_DINSE_FILE
+            else:
+                raise AssertionError(f"{var_type} not supported")
+
+            data = pd.DataFrame(
+                np.load(expected_file), columns=["Failcode", "dftime", "CIF", "CIF_LCL", "CIF_UCL"]
+            ).query("dftime > 0")
+            true_x = data.loc[data.Failcode == 1, "dftime"].to_numpy()
+
+            _, km_y, km_ci = kaplan_meier_estimator(event > 0, ftime, conf_type="log-log")
+
+            true_y = [1.0 - km_y]
+            true_ci = [1.0 - km_ci]
+            for _, subet in data.groupby("Failcode"):
+                true_y.append(subet["CIF"].to_numpy())
+                true_ci.append(np.stack((subet["CIF_LCL"].to_numpy(), subet["CIF_UCL"].to_numpy())))
+
+            true_y = np.stack(true_y)
+            true_ci = np.stack(true_ci)
+
+            if var_type is None:
+                return event, ftime, true_x, true_y
+            return event, ftime, true_x, true_y, true_ci
+
+        return (_load_cgvhd,)
+
+
+class TestCumIncCompetingRisks:
+    @staticmethod
+    @pytest.mark.parametrize("event, time, true_x, true_y", SimpleDataBMTCases().get_cases())
+    def test_wrong_dtype(event, time, true_x, true_y):
+        event = event.astype(bool)
+        with pytest.raises(ValueError, match=f"Elements of event indicator must be integer, but found {event.dtype}"):
+            _x, _y = cumulative_incidence_competing_risks(event, time)
+
+    @staticmethod
+    @pytest.mark.parametrize("event, time, true_x, true_y", SimpleDataBMTCases().get_cases())
+    def test_non_negative(event, time, true_x, true_y):
+        event = event.copy()
+        event[0] = -1
+        with pytest.raises(ValueError, match="Elements of event indicator must be non-negative"):
+            _x, _y = cumulative_incidence_competing_risks(event, time)
+
+    @staticmethod
+    @pytest.mark.parametrize("event, time, true_x, true_y", SimpleDataBMTCases().get_cases())
+    def test_all_risks_appear(event, time, true_x, true_y):
+        mask = event != 1
+        event = np.compress(mask, event)
+        time = np.compress(mask, time)
+        with pytest.raises(ValueError, match="Some risks do not appear in the event array."):
+            _x, _y = cumulative_incidence_competing_risks(event, time)
+
+    @staticmethod
+    @pytest.mark.parametrize("event, time, true_x, true_y", SimpleDataBMTCases().get_cases())
+    def test_full(event, time, true_x, true_y):
+        x, y = cumulative_incidence_competing_risks(event, time)
+
+        assert_array_equal(x, true_x)
+        _x_km, true_km = kaplan_meier_estimator(event > 0, time)
+        assert_array_almost_equal(y[0], 1.0 - true_km)
+        assert_array_almost_equal(y[1:], true_y)
+        assert_array_almost_equal(y[0], y[1:].sum(axis=0))
+
+    @staticmethod
+    @pytest.mark.parametrize("event, time, true_x, true_y", SimpleDataBMTCases().get_cases())
+    def test_truncated(event, time, true_x, true_y):
+        time_min = -1
+        x, y = cumulative_incidence_competing_risks(event, time, time_min=time_min)
+
+        assert_array_equal(x, true_x)
+        _x_km, true_km = kaplan_meier_estimator(event > 0, time, time_min=time_min)
+        assert_array_almost_equal(y[0], 1.0 - true_km)
+        assert_array_almost_equal(y[1:], true_y)
+        assert_array_almost_equal(y[0], y[1:].sum(axis=0))
+
+    @staticmethod
+    @pytest.mark.parametrize("var_type", ["Aalen", "Dinse_Approx", "Dinse"])
+    @pytest.mark.parametrize("get_expected_fn", CGVHD_DataSets().get_cases())
+    def test_ci(get_expected_fn, var_type):
+        event, time, true_x, true_y, true_ci = get_expected_fn(var_type=var_type)
+
+        x, y, ci = cumulative_incidence_competing_risks(event, time, conf_type="log-log", var_type=var_type)
+
+        assert_array_equal(x, true_x)
+        assert_array_almost_equal(y, true_y)
+        assert_array_almost_equal(y[0], y[1:].sum(axis=0))
+
+        nan_mask = np.isnan(true_ci)
+        assert_allclose(np.ma.masked_array(ci, nan_mask), np.ma.masked_array(true_ci, nan_mask), rtol=5.0e-4)
+        assert_array_equal(np.ma.masked_array(ci, ~nan_mask), np.ma.masked_array(np.zeros_like(ci), ~nan_mask))
+
+    @staticmethod
+    @pytest.mark.parametrize("event, time, true_x, true_y", SimpleDataBMTCases().get_cases())
+    @pytest.mark.parametrize("conf_level", [None, -1, 1.0, 3.0, np.inf, np.nan])
+    def test_invalid_conf_level_competing_risks(event, time, true_x, true_y, conf_level):
+        msg = f"conf_level must be a float in the range (0.0, 1.0), but was {conf_level}"
+        with pytest.raises(ValueError, match=re.escape(msg)):
+            cumulative_incidence_competing_risks(event, time, conf_level=conf_level, conf_type="log-log")
+
+    @staticmethod
+    @pytest.mark.parametrize("event, time, true_x, true_y", SimpleDataBMTCases().get_cases())
+    @pytest.mark.parametrize("conf_type", ["None", -1, "", "not"])
+    def test_invalid_conf_type_competing_risks(event, time, true_x, true_y, conf_type):
+        msg = f"conf_type must be None or a str among {{'log-log'}}, but was {conf_type!r}"
+        with pytest.raises(ValueError, match=msg):
+            cumulative_incidence_competing_risks(event, time, conf_level=0.9, conf_type=conf_type)
+
+    @staticmethod
+    @pytest.mark.parametrize("event, time, true_x, true_y", SimpleDataBMTCases().get_cases())
+    @pytest.mark.parametrize("var_type", ["None", "dinse", 1, "", "not"])
+    def test_invalid_var_type_competing_risks(event, time, true_x, true_y, var_type):
+        msg = f"{var_type=} must be one of 'Aalen', 'Dinse', or 'Dinse_Approx'."
+        with pytest.raises(ValueError, match=msg):
+            cumulative_incidence_competing_risks(event, time, conf_level=0.95, conf_type="log-log", var_type=var_type)

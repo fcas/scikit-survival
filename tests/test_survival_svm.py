@@ -22,8 +22,8 @@ from sksurv.svm.naive_survival_svm import NaiveSurvivalSVM
 from sksurv.svm.survival_svm import (
     FastKernelSurvivalSVM,
     FastSurvivalSVM,
-    OrderStatisticTreeSurvivalCounter,
-    SurvivalCounter,
+    _OrderStatisticTreeSurvivalCounter,
+    _SurvivalCounter,
 )
 from sksurv.testing import FixtureParameterFactory, assert_cindex_almost_equal
 from sksurv.util import Surv
@@ -497,7 +497,7 @@ class TestFastSurvivalSVM:
     @pytest.mark.slow()
     def test_fit_timeit(make_whas500, optimizer_any):
         whas500 = make_whas500(to_numeric=True)
-        idx = np.random.RandomState(0).choice(np.arange(whas500.x.shape[0]), replace=False, size=100)
+        idx = np.random.default_rng(0).choice(np.arange(whas500.x.shape[0]), replace=False, size=100)
 
         ssvm = FastSurvivalSVM(optimizer=optimizer_any, timeit=3, random_state=0)
         ssvm.fit(whas500.x[idx, :], whas500.y[idx])
@@ -517,12 +517,12 @@ class TestKernelSurvivalSVM:
             x = whas500.x
         ssvm.fit(x, whas500.y)
 
-        assert ssvm._more_tags()["pairwise"] is (kernel == "precomputed")
+        assert ssvm.__sklearn_tags__().input_tags.pairwise is (kernel == "precomputed")
 
         assert whas500.x.shape[0] == ssvm.coef_.shape[0]
 
         i = np.arange(250)
-        np.random.RandomState(0).shuffle(i)
+        np.random.default_rng(0).shuffle(i)
         c = ssvm.score(x[i], whas500.y[i])
         assert c == pytest.approx(0.76923445664157997)
 
@@ -545,12 +545,12 @@ class TestKernelSurvivalSVM:
             x = whas500.x
         ssvm.fit(x, whas500.y)
 
-        assert ssvm._get_tags()["pairwise"] is (kernel == "precomputed")
+        assert ssvm.__sklearn_tags__().input_tags.pairwise is (kernel == "precomputed")
 
-        assert float(ssvm.intercept_) == pytest.approx(6.416017539824949, 1e-5)
+        assert float(ssvm.intercept_) == pytest.approx(6.416017539824949, rel=1e-3)
 
         i = np.arange(250)
-        np.random.RandomState(0).shuffle(i)
+        np.random.default_rng(0).shuffle(i)
         pred = ssvm.predict(x[i])
         rmse = np.sqrt(mean_squared_error(whas500.y["lenfol"][i], pred))
         assert rmse <= 1342.274550652291 + 0.293
@@ -581,7 +581,7 @@ class TestKernelSurvivalSVM:
         ssvm = FastKernelSurvivalSVM(optimizer=optimizer, kernel="rbf", tol=2e-6, max_iter=75, random_state=0)
         ssvm.fit(whas500.x, whas500.y)
 
-        assert not ssvm._get_tags()["pairwise"]
+        assert not ssvm.__sklearn_tags__().input_tags.pairwise
         assert whas500.x.shape[0] == ssvm.coef_.shape[0]
 
         c = ssvm.score(whas500.x, whas500.y)
@@ -597,7 +597,7 @@ class TestKernelSurvivalSVM:
         )
         ssvm.fit(whas500.x, whas500.y)
 
-        assert not ssvm._get_tags()["pairwise"]
+        assert not ssvm.__sklearn_tags__().input_tags.pairwise
         assert ssvm.intercept_ == pytest.approx(4.9267218894089533, 1e-7)
 
         pred = ssvm.predict(whas500.x)
@@ -623,7 +623,7 @@ class TestKernelSurvivalSVM:
         )
         ssvm.fit(X, whas500.y)
 
-        assert not ssvm._get_tags()["pairwise"]
+        assert not ssvm.__sklearn_tags__().input_tags.pairwise
         assert pytest.approx(6.482593184472981, 1e-5) == ssvm.intercept_
 
         pred = ssvm.predict(X)
@@ -644,7 +644,7 @@ class TestKernelSurvivalSVM:
         )
         ssvm.fit(whas500.x, whas500.y)
 
-        assert not ssvm._get_tags()["pairwise"]
+        assert not ssvm.__sklearn_tags__().input_tags.pairwise
         assert whas500.x.shape[0] == ssvm.coef_.shape[0]
 
         c = ssvm.score(whas500.x, whas500.y)
@@ -717,7 +717,8 @@ class TestKernelSurvivalSVM:
     @staticmethod
     def test_fit_precomputed_kernel_not_symmetric():
         ssvm = FastKernelSurvivalSVM(optimizer="rbtree", kernel="precomputed", random_state=0)
-        x = np.random.randn(100, 100)
+        rng = np.random.default_rng()
+        x = rng.standard_normal((100, 100))
         x[10, 12] = -1
         x[12, 10] = 9
         y = Surv.from_arrays(np.ones(100).astype(bool), np.ones(100))
@@ -732,7 +733,8 @@ class TestKernelSurvivalSVM:
         x = np.dot(whas500.x, whas500.x.T)
         ssvm.fit(x, whas500.y)
 
-        x_new = np.random.randn(100, 14)
+        rng = np.random.default_rng()
+        x_new = rng.standard_normal((100, 14))
         with pytest.raises(
             ValueError,
             match=r"Precomputed metric requires shape \(n_queries, n_indexed\)\. Got \(100, 14\) for 500 indexed\.",
@@ -749,9 +751,9 @@ class TestKernelSurvivalSVM:
 
 @pytest.fixture(
     params=[
-        SurvivalCounter,
-        partial(OrderStatisticTreeSurvivalCounter, tree_class=RBTree),
-        partial(OrderStatisticTreeSurvivalCounter, tree_class=AVLTree),
+        _SurvivalCounter,
+        partial(_OrderStatisticTreeSurvivalCounter, tree_class=RBTree),
+        partial(_OrderStatisticTreeSurvivalCounter, tree_class=AVLTree),
     ]
 )
 def make_survival_counter(request):

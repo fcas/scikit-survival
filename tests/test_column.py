@@ -5,7 +5,7 @@ import pandas.testing as tm
 import pytest
 
 from sksurv import column
-from sksurv.testing import FixtureParameterFactory
+from sksurv.testing import FixtureParameterFactory, get_pandas_infer_string_context
 
 
 class StandardizeCase(FixtureParameterFactory):
@@ -42,23 +42,43 @@ class StandardizeCase(FixtureParameterFactory):
             }
         )
 
-        data["q3"] = data.loc[:, "q3"].astype("category")
+        data = data.astype({"q3": "category"})
         return data
+
+    @property
+    def numeric_data_with_missing(self):
+        return pd.DataFrame(
+            {"a": [1.0, 2.0, np.nan, 4.0], "b": [1.0, 2.0, 3.0, 4.0]},
+            index=[10, 20, 30, 40],
+        )
+
+    @property
+    def expected_with_missing(self):
+        return pd.DataFrame(
+            {
+                "a": [-0.872872, -0.218218, np.nan, 1.091089],
+                "b": [-1.161895, -0.387298, 0.387298, 1.161895],
+            },
+            index=[10, 20, 30, 40],
+        )
 
     def data_numeric(self):
         return self.numeric_data, self.expected
 
+    def data_numeric_with_missing(self):
+        return self.numeric_data_with_missing, self.expected_with_missing
+
     def data_float_numpy_array(self):
-        return self.numeric_data.values, self.expected
+        return self.numeric_data.to_numpy(), self.expected
 
     def data_int_numpy_array(self):
-        return self.numeric_data.values.astype(int), self.expected
+        return self.numeric_data.to_numpy(dtype=int), self.expected
 
     def data_non_numeric(self):
         return self.non_numeric_data, self.non_numeric_data
 
     def data_non_numeric_numpy_array(self):
-        data = self.non_numeric_data.values
+        data = self.non_numeric_data.to_numpy()
         return data, pd.DataFrame(data)
 
     def data_mixed(self):
@@ -68,7 +88,7 @@ class StandardizeCase(FixtureParameterFactory):
 
     def data_mixed_numpy_array(self):
         data, _ = self.data_mixed()
-        data = data.values
+        data = data.to_numpy()
         return data, pd.DataFrame(data)
 
 
@@ -79,20 +99,38 @@ def test_standardize(in_data, expected):
 
     # check that data wasn't modified inplace
     if isinstance(before, np.ndarray) and np.issubdtype(before.dtype, float):
-        assert_array_equal(before, in_data)
+        assert_array_equal(before, in_data, strict=True)
     elif isinstance(before, pd.DataFrame):
         tm.assert_frame_equal(before, in_data)
 
     if isinstance(result, np.ndarray):
         result = pd.DataFrame(result, columns=expected.columns)
 
-    tm.assert_frame_equal(pd.isnull(result), pd.isnull(expected))
+    tm.assert_frame_equal(pd.isna(result), pd.isna(expected))
     tm.assert_frame_equal(result, expected)
+
+
+def test_standardize_with_missing_no_std():
+    data = pd.DataFrame({"a": [1.0, 2.0, np.nan, 4.0]})
+
+    result = column.standardize(data, with_std=False)
+
+    expected = pd.DataFrame({"a": [-4.0 / 3, -1.0 / 3, np.nan, 5.0 / 3]})
+    tm.assert_frame_equal(result, expected)
+
+
+def test_standardize_numpy_without_std():
+    data = np.arange(12, dtype=float).reshape(4, 3)
+
+    result = column.standardize(data, with_std=False)
+
+    expected = data - data.mean(axis=0)
+    np.testing.assert_allclose(result, expected)
 
 
 class CategoricalCases(FixtureParameterFactory):
     def _make_randn(self, shape):
-        return np.random.RandomState(0).randn(shape)
+        return np.random.default_rng(0).standard_normal(shape)
 
     @property
     def mixed_data_frame(self):
@@ -157,7 +195,7 @@ class EncodeCategoricalCases(CategoricalCases):
                 "a_category=small": a_small,
                 "a_category=tiny": a_tiny,
                 "a_binary=yes": eb,
-                "a_number": input_df.loc[:, "a_number"].values.copy(),
+                "a_number": input_df.loc[:, "a_number"].to_numpy(copy=True),
             }
         )
 
@@ -182,7 +220,7 @@ class EncodeCategoricalCases(CategoricalCases):
         # medium
         expected_df.iloc[-3:, 0] = 1
 
-        expected_df.loc[:, "a_number"] = input_df.loc[:, "a_number"].values.copy()
+        expected_df.loc[:, "a_number"] = input_df.loc[:, "a_number"].to_numpy(copy=True)
 
         return input_df, {}, expected_df
 
@@ -247,21 +285,39 @@ class EncodeCategoricalCases(CategoricalCases):
         return input_df, kwargs, expected_df
 
 
-@pytest.mark.parametrize("inputs,kwargs,expected_df", EncodeCategoricalCases().get_cases())
-@pytest.mark.filterwarnings(
-    "ignore:In a future version, the Index constructor will not infer numeric dtypes when "
-    "passed object-dtype sequences \\(matching Series behavior\\):FutureWarning"
-)  # deprecated in pandas 1.4.0
-def test_encode_categorical(inputs, kwargs, expected_df):
-    actual_df = column.encode_categorical(inputs, **kwargs)
-    tm.assert_frame_equal(actual_df.isnull(), expected_df.isnull())
-    tm.assert_frame_equal(actual_df, expected_df, check_exact=True)
+@pytest.mark.parametrize("infer_string_context", get_pandas_infer_string_context())
+@pytest.mark.parametrize("make_data_fn", EncodeCategoricalCases().get_cases_func())
+def test_encode_categorical(make_data_fn, infer_string_context):
+    with infer_string_context:
+        inputs, kwargs, expected_df = make_data_fn()
+        actual_df = column.encode_categorical(inputs, **kwargs)
+        tm.assert_frame_equal(actual_df.isnull(), expected_df.isnull())
+        tm.assert_frame_equal(actual_df, expected_df, check_exact=True)
+
+
+def test_encode_categorical_series_preserves_index():
+    input_series = pd.Series(["a", "b", "a"], name="letter", index=["r0", "r0", "r2"])
+    expected = pd.DataFrame({"letter=b": [0.0, 1.0, 0.0]}, index=input_series.index)
+
+    actual = column.encode_categorical(input_series)
+
+    tm.assert_frame_equal(actual, expected, check_exact=True)
+
+
+def test_encode_categorical_drops_single_category_series_preserves_index():
+    input_series = pd.Series(pd.Categorical(["a", "a", "a"]), name="c", index=["r0", "r1", "r2"])
+
+    actual = column.encode_categorical(input_series)
+
+    assert isinstance(actual, pd.DataFrame)
+    assert actual.shape == (3, 0)
+    assert list(actual.index) == ["r0", "r1", "r2"]
 
 
 def test_series_numeric():
     input_series = pd.Series([0.5, 0.1, 10, 25, 3.8, 11, 2256, -1, -0.2, 3.14], name="a_series")
 
-    with pytest.raises(TypeError, match="series must be of categorical dtype, but was float"):
+    with pytest.raises(TypeError, match="series must be of categorical dtype"):
         column.encode_categorical(input_series)
 
 
@@ -289,6 +345,11 @@ class CategoricalToNumeric(CategoricalCases):
         )
         return input_series, expected
 
+    def data_object_numeric_series_to_numeric(self):
+        input_series = pd.Series([1, 2, 1], name="x", dtype=object)
+        expected = pd.Series([1, 2, 1], name="x", dtype=np.int64)
+        return input_series, expected
+
     def data_frame_to_numeric(self):
         input_df = self.mixed_data_frame
 
@@ -296,16 +357,24 @@ class CategoricalToNumeric(CategoricalCases):
         b_num = np.r_[np.repeat([1], 8), np.repeat([0], 23)].astype(np.int64)
 
         expected = pd.DataFrame.from_dict({"a_category": a_num, "a_binary": b_num})
-        expected.loc[:, "a_number"] = input_df.loc[:, "a_number"].values.copy()
+        expected.loc[:, "a_number"] = input_df.loc[:, "a_number"].to_numpy(copy=True)
 
         return input_df, expected
 
+    def data_object_numeric_frame_to_numeric(self):
+        input_df = pd.DataFrame({"x": pd.Series([1, 2, 1], dtype=object)})
+        expected = pd.DataFrame({"x": pd.Series([1, 2, 1], dtype=np.int64)})
+        return input_df, expected
 
-@pytest.mark.parametrize("input_df,expected", CategoricalToNumeric().get_cases())
-def test_categorical_to_numeric(input_df, expected):
-    actual = column.categorical_to_numeric(input_df)
 
-    if isinstance(expected, pd.Series):
-        tm.assert_series_equal(actual, expected, check_exact=True)
-    else:
-        tm.assert_frame_equal(actual, expected, check_exact=True)
+@pytest.mark.parametrize("infer_string_context", get_pandas_infer_string_context())
+@pytest.mark.parametrize("make_data_fn", CategoricalToNumeric().get_cases_func())
+def test_categorical_to_numeric(make_data_fn, infer_string_context):
+    with infer_string_context:
+        input_df, expected = make_data_fn()
+        actual = column.categorical_to_numeric(input_df)
+
+        if isinstance(expected, pd.Series):
+            tm.assert_series_equal(actual, expected, check_exact=True)
+        else:
+            tm.assert_frame_equal(actual, expected, check_exact=True)

@@ -1,3 +1,15 @@
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 from collections import OrderedDict
 
 import numpy as np
@@ -11,43 +23,44 @@ __all__ = ["compare_survival"]
 
 
 def compare_survival(y, group_indicator, return_stats=False):
-    """K-sample log-rank hypothesis test of identical survival functions.
+    """
+    Compare survival functions of two or more groups using the log-rank test.
 
-    Compares the pooled hazard rate with each group-specific
-    hazard rate. The alternative hypothesis is that the hazard
-    rate of at least one group differs from the others at some time.
+    The log-rank test is a non-parametric hypothesis test for comparing the
+    survival functions of two or more independent groups. The null hypothesis is
+    that the survival functions of the groups are identical. The alternative
+    hypothesis is that at least one survival function differs from the others.
+
+    The test statistic is approximately chi-squared distributed with :math:`K-1`
+    degrees of freedom, where :math:`K` is the number of groups.
 
     See [1]_ for more details.
 
     Parameters
     ----------
     y : structured array, shape = (n_samples,)
-        A structured array containing the binary event indicator
-        as first field, and time of event or time of censoring as
-        second field.
-
+        A structured array with two fields. The first field is a boolean
+        where ``True`` indicates an event and ``False`` indicates right-censoring.
+        The second field is a float with the time of event or time of censoring.
     group_indicator : array-like, shape = (n_samples,)
         Group membership of each sample.
-
     return_stats : bool, optional, default: False
-        Whether to return a data frame with statistics for each group
-        and the covariance matrix of the test statistic.
+        Whether to return a data frame with statistics for each group and the
+        covariance matrix of the test statistic.
 
     Returns
     -------
     chisq : float
-        Test statistic.
+        The test statistic.
     pvalue : float
-        Two-sided p-value with respect to the null hypothesis
-        that the hazard rates across all groups are equal.
-    stats : pandas.DataFrame
-        Summary statistics for each group:  number of samples,
-        observed number of events, expected number of events,
-        and test statistic.
-        Only provided if `return_stats` is True.
-    covariance : array, shape=(n_groups, n_groups)
-        Covariance matrix of the test statistic.
-        Only provided if `return_stats` is True.
+        The two-sided p-value for the test.
+    stats : pandas.DataFrame, optional
+        A DataFrame with summary statistics for each group. This includes the
+        number of samples, observed number of events, expected number of events,
+        and the test statistic. Only returned if ``return_stats`` is ``True``.
+    covariance : ndarray, shape=(n_groups, n_groups), optional
+        The covariance matrix of the test statistic. Only returned if
+        ``return_stats`` is ``True``.
 
     References
     ----------
@@ -117,7 +130,7 @@ def compare_survival(y, group_indicator, return_stats=False):
         table["expected"] = expected
         table["statistic"] = observed - expected
         table = pd.DataFrame.from_dict(table)
-        table.index = pd.Index(groups, name="group", dtype=groups.dtype)
+        table.index = pd.Index(groups, name="group")
         return chisq, pval, table, covar
 
     return chisq, pval

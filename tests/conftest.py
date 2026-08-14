@@ -3,9 +3,10 @@ from pathlib import Path
 import tempfile
 
 import numpy as np
+from packaging.version import Version
 import pandas as pd
 import pytest
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_array
 
 from sksurv.column import categorical_to_numeric, encode_categorical, standardize
 from sksurv.datasets import load_breast_cancer, load_whas500
@@ -15,6 +16,9 @@ DataSet = namedtuple("DataSet", ["x", "y"])
 DataSetWithNames = namedtuple("DataSetWithNames", ["x", "y", "names", "x_data_frame"])
 SparseDataSet = namedtuple("SparseDataSet", ["x_dense", "x_sparse", "y"])
 
+if Version("2.3.0") <= Version(pd.__version__) < Version("3.0.0"):
+    pd.set_option("mode.copy_on_write", True)
+
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: marks test as slow (deselect with '-m \"not slow\"')")
@@ -22,7 +26,8 @@ def pytest_configure(config):
 
 @pytest.fixture()
 def fake_data():
-    x = np.random.randn(100, 11)
+    rng = np.random.default_rng()
+    x = rng.standard_normal((100, 11))
     y = Surv.from_arrays(np.ones(100, dtype=bool), np.arange(1, 101, dtype=float))
     return x, y
 
@@ -45,7 +50,7 @@ def make_whas500():
         if to_numeric:
             x = categorical_to_numeric(x)
         names = ["(Intercept)"] + x.columns.tolist()
-        return DataSetWithNames(x=x.values, y=y, names=names, x_data_frame=x)
+        return DataSetWithNames(x=x.to_numpy(), y=y, names=names, x_data_frame=x)
 
     return _make_whas500
 
@@ -64,7 +69,9 @@ def whas500_sparse_data():
         index_i.extend(idx)
         index_j.extend([j] * len(idx))
 
-    x_sparse = coo_matrix((data, (index_i, index_j)))
+    index_i = np.asarray(index_i, dtype=np.int32)
+    index_j = np.asarray(index_j, dtype=np.int32)
+    x_sparse = coo_array((data, (index_i, index_j)))
     return SparseDataSet(x_dense=x_dense, x_sparse=x_sparse, y=y)
 
 
@@ -98,5 +105,8 @@ def non_finite_value(request):
 def temp_file():
     f = tempfile.NamedTemporaryFile(mode="w", delete=False)
     fp = Path(f.name)
-    yield f
-    fp.unlink()
+    try:
+        yield f
+    finally:
+        f.close()
+        fp.unlink(missing_ok=True)

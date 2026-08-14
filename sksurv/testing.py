@@ -10,23 +10,27 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+from contextlib import nullcontext
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 import inspect
 from pathlib import Path
 import pkgutil
 
 import numpy as np
 from numpy.testing import assert_almost_equal, assert_array_equal
+from packaging.version import parse
+import pandas as pd
 import pytest
+from sklearn.base import BaseEstimator, TransformerMixin
 
 import sksurv
-from sksurv.base import SurvivalAnalysisMixin
 from sksurv.metrics import concordance_index_censored
 
 
 def assert_cindex_almost_equal(event_indicator, event_time, estimate, expected):
     result = concordance_index_censored(event_indicator, event_time, estimate)
-    assert_array_equal(result[1:], expected[1:])
+    assert_array_equal(result[1:], expected[1:], strict=True)
     concordant, discordant, tied_risk = result[1:4]
     cc = (concordant + 0.5 * tied_risk) / (concordant + discordant + tied_risk)
     assert_almost_equal(result[0], cc)
@@ -72,8 +76,15 @@ def assert_chf_properties(chf):
         raise AssertionError(f"most ({num_closer_to_one}) hazard rates at first time point are closer to 1 than 0")
 
 
-def _is_survival_mixin(x):
-    return inspect.isclass(x) and x is not SurvivalAnalysisMixin and issubclass(x, SurvivalAnalysisMixin)
+def _is_survival_estimator(x):
+    return (
+        inspect.isclass(x)
+        and issubclass(x, BaseEstimator)
+        and not issubclass(x, TransformerMixin)
+        and x.__module__.startswith("sksurv.")
+        and not x.__name__.startswith("_")
+        and x.__module__.split(".", 2)[1] not in {"metrics", "nonparametric"}
+    )
 
 
 def all_survival_estimators():
@@ -84,9 +95,9 @@ def all_survival_estimators():
         if modname.startswith("sksurv.meta"):
             continue
         module = import_module(modname)
-        for _name, cls in inspect.getmembers(module, _is_survival_mixin):
+        for _name, cls in inspect.getmembers(module, _is_survival_estimator):
             if inspect.isabstract(cls):
-                continue
+                continue  # pragma: no cover
             all_classes.append(cls)
     return set(all_classes)
 
@@ -99,3 +110,51 @@ class FixtureParameterFactory:
                 values = func()
                 cases.append(pytest.param(*values, id=name))
         return cases
+
+    def get_cases_func(self):
+        cases = []
+        for name, func in inspect.getmembers(self):
+            if name.startswith("data_"):
+                cases.append(pytest.param(func, id=name))
+        return cases
+
+
+def check_module_minimum_version(module, min_version_str, max_version_str=None):
+    """
+    Check whether a module of a specified minimum version is available.
+
+    Parameters
+    ----------
+    module : str
+        Name of the module.
+    min_version_str : str
+        Minimum version of the module.
+    max_version_str : str, optional
+        Maximum version of the module (excluding).
+
+    Returns
+    -------
+    bool
+        True if the module is available and its version is >= `version_str`.
+    """
+    try:
+        module_version = parse(version(module))
+        required_min_version = parse(min_version_str)
+        if max_version_str is None:
+            return module_version >= required_min_version
+        required_max_version = parse(max_version_str)
+        return required_min_version <= module_version < required_max_version
+    except PackageNotFoundError:  # pragma: no cover
+        return False
+
+
+def get_pandas_infer_string_context():
+    if check_module_minimum_version("pandas", "2.3.0", "3.0.0"):
+        return (
+            pytest.param(pd.option_context("future.infer_string", False), id="infer_string=False"),
+            pytest.param(pd.option_context("future.infer_string", True), id="infer_string=True"),
+        )
+    return (
+        pytest.param(nullcontext(), id="pandas default options"),
+        pytest.param(nullcontext(), marks=pytest.mark.skip("no pandas 2.3.0")),
+    )

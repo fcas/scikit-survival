@@ -14,7 +14,7 @@ from sklearn.tree._tree import TREE_UNDEFINED
 from sksurv.compare import compare_survival
 from sksurv.datasets import load_breast_cancer, load_veterans_lung_cancer
 from sksurv.nonparametric import kaplan_meier_estimator, nelson_aalen_estimator
-from sksurv.tree import ExtraSurvivalTree, SurvivalTree
+from sksurv.tree import SurvivalTree
 from sksurv.util import Surv
 
 
@@ -26,21 +26,23 @@ def veterans():
 @pytest.fixture()
 def breast_cancer():
     X, y = load_breast_cancer()
-    X["er"] = X.loc[:, "er"].map({"negative": 0, "positive": 1})
-    X["grade"] = X.loc[:, "grade"].map(
-        {
-            "intermediate": 0,
-            "poorly differentiated": 1,
-            "unkown": 2,
-            "well differentiated": 3,
-        }
+    X = X.assign(
+        er=X["er"].map({"negative": 0, "positive": 1}),
+        grade=X["grade"].map(
+            {
+                "intermediate": 0,
+                "poorly differentiated": 1,
+                "unkown": 2,
+                "well differentiated": 3,
+            }
+        ),
     )
     return X, y
 
 
 @pytest.fixture()
 def toy_data():
-    rnd = np.random.RandomState(1)
+    rnd = np.random.default_rng(1)
     n_samples = 500
     X = np.empty((n_samples, 4), dtype=float)
     X[:, :2] = rnd.normal(scale=2, size=(n_samples, 2))
@@ -155,7 +157,7 @@ class LogrankTreeBuilder:
 
 def test_tree_one_split(veterans):
     X, y = veterans
-    X = X.loc[:, "Karnofsky_score"].values[:, np.newaxis]
+    X = X.loc[:, "Karnofsky_score"].to_numpy()[:, np.newaxis]
 
     tree = SurvivalTree(max_depth=1)
     tree.fit(X, y)
@@ -163,9 +165,9 @@ def test_tree_one_split(veterans):
     stats = LogrankTreeBuilder(max_depth=1).build(X, y)
 
     assert tree.tree_.capacity == stats.shape[0]
-    assert_array_equal(tree.tree_.feature, stats.loc[:, "feature"].values)
-    assert_array_equal(tree.tree_.n_node_samples, stats.loc[:, "n_node_samples"].values)
-    assert_array_almost_equal(tree.tree_.threshold, stats.loc[:, "threshold"].values)
+    assert_array_equal(tree.tree_.feature, stats.loc[:, "feature"].to_numpy())
+    assert_array_equal(tree.tree_.n_node_samples, stats.loc[:, "n_node_samples"].to_numpy())
+    assert_array_almost_equal(tree.tree_.threshold, stats.loc[:, "threshold"].to_numpy())
 
     expected_time = np.array(
         [
@@ -304,7 +306,7 @@ def test_tree_one_split(veterans):
 
 def test_tree_two_split(veterans):
     X, y = veterans
-    X = X.loc[:, "Karnofsky_score"].values[:, np.newaxis]
+    X = X.loc[:, "Karnofsky_score"].to_numpy()[:, np.newaxis]
 
     tree = SurvivalTree(max_depth=2, max_features=1)
     tree.fit(X, y)
@@ -344,7 +346,7 @@ def test_tree_two_split(veterans):
 
 def test_tree_split_all_censored(veterans):
     X, y = veterans
-    X = X.loc[:, "Karnofsky_score"].values[:, np.newaxis]
+    X = X.loc[:, "Karnofsky_score"].to_numpy()[:, np.newaxis]
     y["Status"][X[:, 0] > 45.0] = False
 
     tree = SurvivalTree(max_depth=2, max_features=1)
@@ -365,9 +367,9 @@ def test_toy_data(toy_data):
     stats = LogrankTreeBuilder(max_depth=4, min_leaf=20).build(X, y)
 
     assert tree.tree_.capacity == stats.shape[0]
-    assert_array_equal(tree.tree_.feature, stats.loc[:, "feature"].values)
-    assert_array_equal(tree.tree_.n_node_samples, stats.loc[:, "n_node_samples"].values)
-    assert_array_almost_equal(tree.tree_.threshold, stats.loc[:, "threshold"].values, 5)
+    assert_array_equal(tree.tree_.feature, stats.loc[:, "feature"].to_numpy())
+    assert_array_equal(tree.tree_.n_node_samples, stats.loc[:, "n_node_samples"].to_numpy())
+    assert_array_almost_equal(tree.tree_.threshold, stats.loc[:, "threshold"].to_numpy(), 5)
 
 
 def test_breast_cancer_1(breast_cancer):
@@ -381,7 +383,7 @@ def test_breast_cancer_1(breast_cancer):
         min_samples_leaf=0.03,
         random_state=6,
     )
-    tree.fit(X.values, y)
+    tree.fit(X.to_numpy(), y)
 
     assert tree.tree_.capacity == 19
     assert_array_equal(
@@ -471,7 +473,7 @@ def test_breast_cancer_2(breast_cancer):
     tree = SurvivalTree(
         max_features="log2", splitter="random", max_depth=5, min_samples_split=30, min_samples_leaf=15, random_state=6
     )
-    tree.fit(X.values, y)
+    tree.fit(X.to_numpy(), y)
 
     assert tree.tree_.capacity == 11
     assert_array_equal(
@@ -560,7 +562,7 @@ def test_fit_int_time(breast_cancer):
     assert_array_almost_equal(tree_f.tree_.threshold, tree_i.tree_.threshold)
 
 
-@pytest.mark.parametrize("dtype,missing", product(supported_float_dtypes(), [False, True]))
+@pytest.mark.parametrize("dtype,missing", list(product(supported_float_dtypes(), [False, True])))
 def test_fit_dtype(toy_data, dtype, missing):
     X, y = toy_data
     if missing:
@@ -604,12 +606,12 @@ def test_predict_step_function(breast_cancer, func):
 @pytest.mark.parametrize("func", ["predict_survival_function", "predict_cumulative_hazard_function"])
 def test_pipeline_predict(breast_cancer, func):
     X_num, y = breast_cancer
-    X_num = X_num.loc[:, ["er", "grade"]].values
+    X_num = X_num.loc[:, ["er", "grade"]].to_numpy()
 
     tree = SurvivalTree().fit(X_num[10:], y[10:])
 
     X_str, _ = load_breast_cancer()
-    X_str = X_str.loc[:, ["er", "grade"]].values
+    X_str = X_str.loc[:, ["er", "grade"]].to_numpy()
 
     pipe = make_pipeline(OrdinalEncoder(), SurvivalTree())
     pipe.fit(X_str[10:], y[10:])
@@ -626,7 +628,8 @@ def test_predict_wrong_features(toy_data, n_features):
     tree = SurvivalTree(max_depth=1)
     tree.fit(X, y)
 
-    X_new = np.random.randn(12, n_features)
+    rng = np.random.default_rng()
+    X_new = rng.standard_normal((12, n_features))
     with pytest.raises(
         ValueError, match=f"X has {n_features} features, but SurvivalTree is expecting 4 features as input."
     ):
@@ -730,7 +733,7 @@ def test_max_leaf_nodes_too_small(fake_data, val):
 
 def test_apply(veterans):
     X, y = veterans
-    X = X.loc[:, "Karnofsky_score"].values[:, np.newaxis].astype(np.float32)
+    X = X.loc[:, "Karnofsky_score"].to_numpy(dtype=np.float32)[:, np.newaxis]
 
     tree = SurvivalTree(max_depth=2, max_features=1)
     tree.fit(X, y)
@@ -752,8 +755,8 @@ def test_apply(veterans):
 
 def test_apply_sparse(veterans):
     X, y = veterans
-    X = X.loc[:, "Karnofsky_score"].values[:, np.newaxis].astype(np.float32)
-    X_sparse = sparse.csr_matrix(X)
+    X = X.loc[:, "Karnofsky_score"].to_numpy(dtype=np.float32)[:, np.newaxis]
+    X_sparse = sparse.csr_array(X)
     tree = SurvivalTree(max_depth=2, max_features=1)
     tree.fit(X_sparse, y)
 
@@ -779,7 +782,7 @@ def test_predict_sparse(make_whas500):
     # Duplicates values in whas500 leads to assert errors because of
     # tie resolution during tree fitting.
     # Using a synthetic dataset resolves this issue.
-    X = np.random.RandomState(seed).binomial(n=5, p=0.1, size=X.shape)
+    X = np.random.default_rng(seed).binomial(n=5, p=0.1, size=X.shape)
 
     X_train, X_test, y_train, _ = train_test_split(X, y, random_state=seed)
 
@@ -789,8 +792,8 @@ def test_predict_sparse(make_whas500):
     y_cum_h = tree.predict_cumulative_hazard_function(X_test)
     y_surv = tree.predict_survival_function(X_test)
 
-    X_train_csr = sparse.csr_matrix(X_train)
-    X_test_csr = sparse.csr_matrix(X_test)
+    X_train_csr = sparse.csr_array(X_train)
+    X_test_csr = sparse.csr_array(X_test)
 
     tree_csr = SurvivalTree(min_samples_leaf=10, random_state=seed)
     tree_csr.fit(X_train_csr, y_train)
@@ -808,7 +811,7 @@ def test_predict_sparse(make_whas500):
 
 def test_missing_values_best_splitter_to_max_samples(veterans):
     X, y = veterans
-    X = X.loc[:, "Karnofsky_score"].values[:, np.newaxis].astype(np.float32)
+    X = X.loc[:, "Karnofsky_score"].to_numpy(copy=np.float32)[:, np.newaxis]
 
     tree = SurvivalTree(max_depth=1)
     tree.fit(X, y)
@@ -823,9 +826,60 @@ def test_missing_values_best_splitter_to_max_samples(veterans):
     assert_array_almost_equal(y_pred, y_expected)
 
 
-def test_missing_values_best_splitter_to_right():
-    X = np.array([[np.nan] * 8 + list(range(7))], dtype=np.float32).T
-    y = Surv.from_arrays(time=np.concatenate((np.arange(8) + 10, np.arange(6, 13))), event=np.ones(15, dtype=bool))
+def test_missing_values_best_splitter_to_right_depth1():
+    # 5 samples with X=0, long survival
+    # 5 samples with X=10, short survival
+    # 10 samples with X=NaN, short survival
+    X = np.empty((20, 1), dtype=float)
+    X[:5, 0] = 0
+    X[5:10, 0] = 10
+    X[10:, 0] = np.nan
+
+    time = np.empty(20, dtype=float)
+    time[:5] = 100
+    time[5:10] = 10
+    time[10:] = 10
+    event = np.ones(20, dtype=bool)
+    y = Surv.from_arrays(time=time, event=event)
+
+    tree = SurvivalTree(max_depth=1, random_state=0)
+    tree.fit(X, y)
+
+    # Missing values should go to the left
+    # Node 0: Root
+    # Node 1: Left
+    # Node 2: Right
+
+    # Left node should have 5 samples
+    assert tree.tree_.n_node_samples[1] == 5
+    # Right node should have 15 samples (5 + 10)
+    assert tree.tree_.n_node_samples[2] == 15
+
+    y_pred_chf = tree.predict_cumulative_hazard_function([[np.nan]], return_array=True)
+    y_pred_surv = tree.predict_survival_function([[np.nan]], return_array=True)
+    y_pred = np.column_stack((y_pred_chf[0], y_pred_surv[0]))
+
+    y_expected = tree.tree_.value[2]
+    assert_array_almost_equal(y_pred, y_expected)
+
+    X[10:, :] = 10
+    stats = LogrankTreeBuilder(max_depth=1, min_leaf=3).build(X, y)
+
+    assert tree.tree_.capacity == stats.shape[0]
+    assert_array_equal(tree.tree_.feature, stats.loc[:, "feature"].to_numpy())
+    assert_array_equal(tree.tree_.n_node_samples, stats.loc[:, "n_node_samples"].to_numpy())
+    assert_array_almost_equal(tree.tree_.threshold, stats.loc[:, "threshold"].to_numpy())
+
+
+def test_missing_values_best_splitter_to_right_depth2():
+    X = np.empty((15, 1), dtype=float)
+    X[:8, 0] = np.nan
+    X[8:, 0] = np.arange(7)
+
+    time = np.empty(15, dtype=float)
+    time[:8] = np.arange(10, 18)
+    time[8:] = np.arange(6, 13)
+    y = Surv.from_arrays(time=time, event=np.ones(15, dtype=bool))
 
     tree = SurvivalTree(max_depth=2)
     tree.fit(X, y)
@@ -835,21 +889,62 @@ def test_missing_values_best_splitter_to_right():
     y_pred = np.column_stack((y_pred_chf[0], y_pred_surv[0]))
 
     # missing values go to the right
+    #       ┌──────┐
+    #       │  N0  │
+    #       └──┬───┘
+    #    ┌─────┴─────┐
+    # ┌──┴───┐    ┌──┴───┐
+    # │  N1  │    │  N2  │
+    # └──────┘    └──┬───┘
+    #           ┌────┴────┐
+    #        ┌──┴───┐  ┌──┴───┐
+    #        │  N3  │  │  N4  │
+    #        └──────┘  └──────┘
+    assert tree.tree_.n_node_samples[4] == 8
+
     y_expected = tree.tree_.value[4]
     assert_array_almost_equal(y_pred, y_expected)
 
 
-@pytest.mark.parametrize("is_sparse", [False, True])
-def test_missing_value_random_splitter_errors(is_sparse):
-    X = np.array([[3, 5, 7, 11, np.nan, 13, 17, np.nan, 19]], dtype=np.float32).T
-    y = Surv.from_arrays(
-        event=np.array([True, True, True, False, True, False, False, False, True]),
-        time=np.array([90, 80, 70, 60, 50, 40, 30, 20, 10]),
-    )
+def test_missing_values_best_splitter_to_left():
+    # 5 samples with X=0, long survival
+    # 5 samples with X=10, short survival
+    # 10 samples with X=NaN, long survival
+    X = np.empty((20, 1), dtype=float)
+    X[:5, :] = 0
+    X[5:10, :] = 10
+    X[10:, :] = np.nan
 
-    if is_sparse:
-        X = sparse.csr_matrix(X)
+    time = np.empty(20, dtype=float)
+    time[:5] = 100
+    time[5:10] = 10
+    time[10:] = 100
+    y = Surv.from_arrays(time=time, event=np.ones(20, dtype=bool))
 
-    tree = ExtraSurvivalTree()
-    with pytest.raises(ValueError, match="Input X contains NaN"):
-        tree.fit(X, y)
+    tree = SurvivalTree(max_depth=1)
+    tree.fit(X, y)
+
+    # Missing values should go to the left
+    # Node 0: Root
+    # Node 1: Left
+    # Node 2: Right
+
+    # Left node should have 15 samples (5 + 10)
+    assert tree.tree_.n_node_samples[1] == 15
+    # Right node should have 5 samples
+    assert tree.tree_.n_node_samples[2] == 5
+
+    y_pred_chf = tree.predict_cumulative_hazard_function([[np.nan]], return_array=True)
+    y_pred_surv = tree.predict_survival_function([[np.nan]], return_array=True)
+    y_pred = np.column_stack((y_pred_chf[0], y_pred_surv[0]))
+
+    y_expected = tree.tree_.value[1]
+    assert_array_almost_equal(y_pred, y_expected)
+
+    X[10:, :] = 0
+    stats = LogrankTreeBuilder(max_depth=1, min_leaf=3).build(X, y)
+
+    assert tree.tree_.capacity == stats.shape[0]
+    assert_array_equal(tree.tree_.feature, stats.loc[:, "feature"].to_numpy())
+    assert_array_equal(tree.tree_.n_node_samples, stats.loc[:, "n_node_samples"].to_numpy())
+    assert_array_almost_equal(tree.tree_.threshold, stats.loc[:, "threshold"].to_numpy())

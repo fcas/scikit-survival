@@ -1,20 +1,29 @@
 Installing scikit-survival
 ==========================
 
-This is the recommended and easiest to install scikit-survival is to use
-:ref:`install-conda`.
+The recommended and easiest way to install scikit-survival is to use
+:ref:`install-conda` or :ref:`install-pip`.
+Pre-built binary packages for scikit-survival are available for Linux, macOS, and Windows.
 Alternatively, you can install scikit-survival :ref:`install-from-source`.
 
 .. _install-conda:
 
-Anaconda
---------
+conda
+-----
 
-Pre-built binary packages for Linux, MacOS, and Windows are available
-for `Anaconda <https://www.anaconda.com/distribution/>`_.
-If you have Anaconda installed, run::
+If you have `conda <https://docs.anaconda.com/>`_ installed, you can
+install scikit-survival from the ``conda-forge`` channel by running::
 
-  conda install -c sebp scikit-survival
+  conda install -c conda-forge scikit-survival
+
+.. _install-pip:
+
+pip
+---
+
+If you use ``pip``, install the latest release of scikit-survival with::
+
+  pip install scikit-survival
 
 
 .. _install-from-source:
@@ -31,9 +40,9 @@ On Linux, you need to install *gcc*, which in most cases is available
 via your distribution's packaging system.
 Please follow your distribution's instructions on how to install packages.
 
-**MacOS**
+**macOS**
 
-On MacOS, you need to install *clang*, which is available from
+On macOS, you need to install *clang*, which is available from
 the *Command Line Tools* package. Open a terminal and execute::
 
   xcode-select --install
@@ -55,7 +64,7 @@ Latest Release
 
 To install the latest release of scikit-survival from source, run::
 
-  pip install scikit-survival
+  pip install scikit-survival --no-binary scikit-survival
 
 
 .. note::
@@ -63,7 +72,7 @@ To install the latest release of scikit-survival from source, run::
     If you have not installed the :ref:`dependencies <dependencies>` previously, this command
     will first install all dependencies before installing scikit-survival.
     Therefore, installation might fail if build requirements of some dependencies
-    are not met. In particular, `osqp <https://github.com/oxfordcontrol/osqp-python>`_
+    are not met. In particular, `osqp <https://github.com/osqp/osqp-python>`_
     does require `CMake <https://cmake.org/>`_ to be installed.
 
 Development Version
@@ -84,13 +93,15 @@ Dependencies
 
 The current minimum dependencies to run scikit-survival are:
 
-- Python 3.9 or later
+- Python 3.11 or later
+- clarabel
 - ecos
 - joblib
 - numexpr
-- numpy
+- numpy 2.0.0 or later
 - osqp
-- pandas 1.0.5 or later
-- scikit-learn 1.4
+- pandas 2.2.0 or later
+- scikit-learn 1.9
 - scipy
+- narwhals 2.0.1 or later
 - C/C++ compiler

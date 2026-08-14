@@ -10,6 +10,10 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+"""
+Ensemble estimator based on stacking.
+"""
+
 import numpy as np
 from sklearn.base import MetaEstimatorMixin, clone
 from sklearn.utils._param_validation import HasMethods
@@ -20,9 +24,11 @@ from ..util import property_available_if
 
 
 def _meta_estimator_has(attr):
-    """Check that meta_estimator has `attr`.
+    """
+    Check that meta_estimator has `attr`.
 
-    Used together with `available_if`."""
+    Used together with `available_if`.
+    """
 
     def check(self):
         # raise original `AttributeError` if `attr` does not exist
@@ -33,7 +39,8 @@ def _meta_estimator_has(attr):
 
 
 class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
-    """Meta estimator that combines multiple base learners.
+    """
+    Meta estimator that combines multiple base learners.
 
     By default, base estimators' output corresponds to the array returned
     by `predict_proba`. If `predict_proba` is not available or `probabilities = False`,
@@ -67,11 +74,11 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
     n_features_in_ : int
         Number of features seen during ``fit``.
 
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+    feature_names_in_ : ndarray, shape = (`n_features_in_`,)
         Names of features seen during ``fit``. Defined only when `X`
         has feature names that are all strings.
 
-    unique_times_ : array of shape = (n_unique_times,)
+    unique_times_ : ndarray, shape = (n_unique_times,)
         Unique time points.
     """
 
@@ -120,7 +127,7 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
 
         Returns
         -------
-        self : object
+        object
             Estimator instance.
         """
         super()._set_params("base_estimators", **params)
@@ -141,7 +148,7 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
 
         Returns
         -------
-        params : dict
+        dict
             Parameter and estimator names mapped to their values or parameter
             names mapped to their values.
         """
@@ -199,22 +206,28 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
         return Xt
 
     def __len__(self):
+        """Return the number of base estimators."""
         return len(self.base_estimators)
 
     def fit(self, X, y=None, **fit_params):
-        """Fit base estimators.
+        """
+        Fit base estimators.
 
         Parameters
         ----------
         X : array-like, shape = (n_samples, n_features)
             Training data.
 
-        y : array-like, optional
+        y : array-like, shape = (n_samples,), optional
             Target data if base estimators are supervised.
+
+        **fit_params : dict
+            Parameters passed to the ``fit`` method of each base estimator.
 
         Returns
         -------
-        self
+        object
+            Fitted estimator.
         """
         self._validate_params()
         self._validate_estimators()
@@ -226,9 +239,10 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
 
     @available_if(_meta_estimator_has("predict"))
     def predict(self, X):
-        """Perform prediction.
+        """
+        Perform prediction.
 
-        Only available of the meta estimator has a predict method.
+        Only available if the meta estimator has a ``predict`` method.
 
         Parameters
         ----------
@@ -237,10 +251,10 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
 
         Returns
         -------
-        prediction : array, shape = (n_samples, n_dim)
+        ndarray, shape = (n_samples, n_dim)
             Prediction of meta estimator that combines
             predictions of base estimators. `n_dim` depends
-            on the return value of meta estimator's `predict`
+            on the return value of meta estimator's ``predict``
             method.
         """
         Xt = self._predict_estimators(X)
@@ -248,9 +262,10 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
 
     @available_if(_meta_estimator_has("predict_proba"))
     def predict_proba(self, X):
-        """Perform prediction.
+        """
+        Perform prediction.
 
-        Only available if the meta estimator has a predict_proba method.
+        Only available if the meta estimator has a ``predict_proba`` method.
 
         Parameters
         ----------
@@ -259,7 +274,7 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
 
         Returns
         -------
-        prediction : ndarray, shape = (n_samples, n_dim)
+        ndarray, shape = (n_samples, n_dim)
             Prediction of meta estimator that combines
             predictions of base estimators. `n_dim` depends
             on the return value of meta estimator's `predict`
@@ -270,9 +285,10 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
 
     @available_if(_meta_estimator_has("predict_log_proba"))
     def predict_log_proba(self, X):
-        """Perform prediction.
+        """
+        Perform prediction.
 
-        Only available if the meta estimator has a predict_log_proba method.
+        Only available if the meta estimator has a ``predict_log_proba`` method.
 
         Parameters
         ----------
@@ -281,7 +297,7 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
 
         Returns
         -------
-        prediction : ndarray, shape = (n_samples, n_dim)
+        ndarray, shape = (n_samples, n_dim)
             Prediction of meta estimator that combines
             predictions of base estimators. `n_dim` depends
             on the return value of meta estimator's `predict`
@@ -296,54 +312,72 @@ class Stacking(MetaEstimatorMixin, SurvivalAnalysisMixin, _BaseComposition):
 
     @available_if(_meta_estimator_has("predict_cumulative_hazard_function"))
     def predict_cumulative_hazard_function(self, X, return_array=False):
-        """Perform prediction.
+        """
+        Perform prediction.
 
-        Only available if the meta estimator has a predict_cumulative_hazard_function method.
+        Only available if the meta estimator has a ``predict_cumulative_hazard_function`` method.
 
         Parameters
         ----------
         X : array-like, shape = (n_samples, n_features)
             Data with samples to predict.
 
-        return_array : boolean, default: False
-            If set, return an array with the cumulative hazard rate
-            for each `self.unique_times_`, otherwise an array of
-            :class:`sksurv.functions.StepFunction`.
+        return_array : bool, default: False
+            Whether to return a single array of cumulative hazard values
+            or a list of step functions.
+
+            If `False`, a list of :class:`sksurv.functions.StepFunction`
+            objects is returned.
+
+            If `True`, a 2d-array of shape `(n_samples, n_unique_times)` is
+            returned, where `n_unique_times` is the number of unique
+            event times in the training data. Each row represents the cumulative
+            hazard function of an individual evaluated at `unique_times_`.
 
         Returns
         -------
-        cum_hazard : ndarray
-            If `return_array` is set, an array with the cumulative hazard rate
-            for each `self.unique_times_`, otherwise an array of length `n_samples`
-            of :class:`sksurv.functions.StepFunction` instances will be returned.
+        ndarray
+            If `return_array` is `False`, an array of `n_samples`
+            :class:`sksurv.functions.StepFunction` instances is returned.
+
+            If `return_array` is `True`, a numeric array of shape
+            `(n_samples, n_unique_times_)` is returned.
         """
         Xt = self._predict_estimators(X)
         return self.final_estimator_.predict_cumulative_hazard_function(Xt, return_array)
 
     @available_if(_meta_estimator_has("predict_survival_function"))
     def predict_survival_function(self, X, return_array=False):
-        """Perform prediction.
+        """
+        Perform prediction.
 
-        Only available if the meta estimator has a predict_survival_function method.
+        Only available if the meta estimator has a ``predict_survival_function`` method.
 
         Parameters
         ----------
         X : array-like, shape = (n_samples, n_features)
             Data with samples to predict.
 
+        return_array : bool, default: False
+            Whether to return a single array of survival probabilities
+            or a list of step functions.
+
+            If `False`, a list of :class:`sksurv.functions.StepFunction`
+            objects is returned.
+
+            If `True`, a 2d-array of shape `(n_samples, n_unique_times)` is
+            returned, where `n_unique_times` is the number of unique
+            event times in the training data. Each row represents the survival
+            function of an individual evaluated at `unique_times_`.
+
         Returns
         -------
-        survival : ndarray
-            If `return_array` is set, an array with the probability of
-            survival for each `self.unique_times_`, otherwise an array of
-            length `n_samples` of :class:`sksurv.functions.StepFunction`
-            instances will be returned.
+        ndarray
+            If `return_array` is `False`, an array of `n_samples`
+            :class:`sksurv.functions.StepFunction` instances is returned.
 
-        return_array : boolean, default: False
-            If set, return an array with the probability
-            of survival for each `self.unique_times_`,
-            otherwise an array of :class:`sksurv.functions.StepFunction`.
-
+            If `return_array` is `True`, a numeric array of shape
+            `(n_samples, n_unique_times_)` is returned.
         """
         Xt = self._predict_estimators(X)
         return self.final_estimator_.predict_survival_function(Xt, return_array)

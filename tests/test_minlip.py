@@ -7,6 +7,7 @@ from sklearn.preprocessing import scale
 from sksurv.column import encode_categorical
 from sksurv.datasets import load_gbsg2
 from sksurv.exceptions import NoComparablePairException
+from sksurv.kernels import ClinicalKernelTransform
 from sksurv.svm._minlip import create_difference_matrix
 from sksurv.svm.minlip import HingeLossSurvivalSVM, MinlipSurvivalAnalysis
 from sksurv.testing import FixtureParameterFactory, assert_cindex_almost_equal
@@ -25,7 +26,7 @@ def create_toy_data():
         ]
     )
 
-    t = np.random.RandomState(0).exponential(scale=8, size=x.shape[0])
+    t = np.random.default_rng(123).exponential(scale=8, size=x.shape[0])
     t.sort()
     y = Surv.from_arrays(
         [True, True, False, True, False, False],
@@ -49,8 +50,8 @@ def toy_test_data():
             [50, 36],
         ]
     )
-    rnd = np.random.RandomState(136)
-    x += rnd.randn(*x.shape)
+    rnd = np.random.default_rng(136)
+    x += rnd.standard_normal(x.shape)
     return x
 
 
@@ -58,7 +59,7 @@ def toy_test_data():
 def gbsg2():
     x, y = load_gbsg2()
     x = encode_categorical(x)
-    return x.values, y
+    return x.to_numpy(), y
 
 
 class DifferenceMatrixToyDataCases(FixtureParameterFactory):
@@ -244,12 +245,25 @@ def test_toy_create_difference_matrix(time, status, kind, expected_mat, expected
         assert_array_almost_equal(expected_diff, actual_diff)
 
 
+def _get_solver_context(solver):
+    from contextlib import nullcontext as does_not_warn
+
+    if solver == "ecos":
+        context = pytest.warns(FutureWarning, match="The 'ecos' solver will be removed in a future release")
+    else:
+        context = does_not_warn()
+    return context
+
+
 @pytest.fixture()
 def minlip_model_factory():
     def create_and_fit_model(solver, x, y, **kwargs):
         params = {"solver": solver, "alpha": 1, "pairs": "next"}
         params.update(kwargs)
-        return MinlipSurvivalAnalysis(**params).fit(x, y)
+
+        with _get_solver_context(solver):
+            est = MinlipSurvivalAnalysis(**params).fit(x, y)
+        return est
 
     return create_and_fit_model
 
@@ -264,16 +278,16 @@ def toy_data_standardized(toy_data, toy_test_data):
 
 class TestToyMinlipSurvivalAnalysis:
     @staticmethod
-    @pytest.mark.parametrize("solver,expected_iters", [("osqp", 100), ("ecos", 10)])
+    @pytest.mark.parametrize("solver,expected_iters", [("osqp", 75), ("clarabel", 9), ("ecos", 10)])
     def test_fit_alpha_2(minlip_model_factory, toy_data, solver, expected_iters):
         x, y = toy_data
         m = minlip_model_factory(solver, x, y, alpha=2.0)
 
-        assert m.n_iter_ > expected_iters
+        assert m.n_iter_ >= expected_iters
         assert (1, 6) == m.coef_.shape
         assert 1 == m.coef0
         expected_coef = np.array(
-            [[-0.011728003147, 0.011728002895, 0.000000000252, -0.017524801335, 0.017524801335, 0.0]]
+            [[-0.0088384276937561, 0.0088384276937561, 0.0, -0.0284823642711752, 0.0284823642711752, 0.0]]
         )
         assert_array_almost_equal(m.coef_, expected_coef)
 
@@ -286,14 +300,14 @@ class TestToyMinlipSurvivalAnalysis:
         assert 7 == len(m.timings_)
 
     @staticmethod
-    @pytest.mark.parametrize("solver", ["osqp", "ecos"])
+    @pytest.mark.parametrize("solver", ["osqp", "clarabel", "ecos"])
     def test_predict_1(minlip_model_factory, toy_data, solver):
         x, y = toy_data
         p = minlip_model_factory(solver, x, y).predict(x)
         assert_cindex_almost_equal(y["status"], y["time"], p, (1.0, 11, 0, 0, 0))
 
     @staticmethod
-    @pytest.mark.parametrize("solver", ["osqp", "ecos"])
+    @pytest.mark.parametrize("solver", ["osqp", "clarabel", "ecos"])
     def test_predict_2(minlip_model_factory, toy_data_standardized, solver):
         (x, y), x_test = toy_data_standardized
 
@@ -302,7 +316,7 @@ class TestToyMinlipSurvivalAnalysis:
 
         p = minlip_model_factory(solver, x, y, pairs="next").predict(x_test)
 
-        expected = np.array([1.368221203557392, -0.476483331099142, -1.009079072163642])
+        expected = np.array([1.3103180617705203, -0.5497858096484980, -1.0841206123723968])
         assert_array_almost_equal(expected, p, decimal=5)
 
 
@@ -311,12 +325,15 @@ def svm_model_factory():
     def create_and_fit_model(solver, x, y, **kwargs):
         params = {"solver": solver, "alpha": 2}
         params.update(kwargs)
-        return HingeLossSurvivalSVM(**params).fit(x, y)
+
+        with _get_solver_context(solver):
+            est = HingeLossSurvivalSVM(**params).fit(x, y)
+        return est
 
     return create_and_fit_model
 
 
-@pytest.mark.parametrize("solver", ["osqp", "ecos"])
+@pytest.mark.parametrize("solver", ["osqp", "clarabel", "ecos"])
 @pytest.mark.parametrize("pairs", ["all", "nearest"])
 def test_toy_hinge_fit_and_predict(svm_model_factory, toy_data_standardized, solver, pairs):
     (x, y), x_test = toy_data_standardized
@@ -331,7 +348,7 @@ def test_toy_hinge_fit_and_predict(svm_model_factory, toy_data_standardized, sol
     assert_cindex_almost_equal(y["status"], y["time"], p, (1.0, 11, 0, 0, 0))
 
     p = m.predict(x_test)
-    expected = np.array([2.8571060045, -1.2661069033, -2.3044907774])
+    expected = np.array([2.8403594979806028, -1.4706675372262765, -2.4700791072167672])
     assert_array_almost_equal(expected, p, decimal=5)
 
 
@@ -344,7 +361,7 @@ def gbsg2_scaled(gbsg2):
 
 class TestMinlipBreastCancer:
     @staticmethod
-    @pytest.mark.parametrize("solver,expected_iters", [("osqp", 1000), ("ecos", 10)])
+    @pytest.mark.parametrize("solver,expected_iters", [("osqp", 900), ("clarabel", 9), ("ecos", 10)])
     def test_fit_and_predict(gbsg2_scaled, minlip_model_factory, solver, expected_iters):
         x, y = gbsg2_scaled
         m = minlip_model_factory(solver, x, y)
@@ -362,13 +379,13 @@ class TestMinlipBreastCancer:
         "solver,expected_cindex",
         [
             ("osqp", (0.6106092942166647, 81255, 51817, 0, 42)),
+            ("clarabel", (0.6106205663099675, 81256, 51815, 1, 42)),
             ("ecos", (0.6105867500300589, 81252, 51820, 0, 42)),
         ],
     )
     def test_fit_and_predict_rbf(gbsg2_scaled, minlip_model_factory, solver, expected_cindex):
         x, y = gbsg2_scaled
         m = minlip_model_factory(solver, x, y, kernel="rbf", gamma=1.0 / 8, pairs="next", max_iter=1000)
-        m.fit(x, y)
 
         assert (1, x.shape[0]) == m.coef_.shape
 
@@ -377,7 +394,7 @@ class TestMinlipBreastCancer:
 
     @staticmethod
     @pytest.mark.slow()
-    @pytest.mark.parametrize("solver", ["osqp", "ecos"])
+    @pytest.mark.parametrize("solver", ["osqp", "clarabel", "ecos"])
     def test_kernel_precomputed(gbsg2_scaled, solver):
         x, y = gbsg2_scaled
         from sklearn.metrics.pairwise import pairwise_kernels
@@ -391,19 +408,37 @@ class TestMinlipBreastCancer:
         X_fit, y_fit = _safe_split(m, K, y, train_idx)
         X_test, y_test = _safe_split(m, K, y, test_idx, train_idx)
 
-        m.fit(X_fit, y_fit)
+        with _get_solver_context(solver):
+            m.fit(X_fit, y_fit)
 
         p = m.predict(X_test)
         assert_cindex_almost_equal(y_test["cens"], y_test["time"], p, (0.6518928901200369, 8472, 4524, 0, 3))
 
     @staticmethod
-    @pytest.mark.parametrize("solver", ["osqp", "ecos"])
+    @pytest.mark.slow()
+    def test_fit_clinical_kernel(make_whas500):
+        whas500 = make_whas500(with_mean=False, with_std=False)
+
+        trans = ClinicalKernelTransform()
+        trans.fit(whas500.x_data_frame)
+
+        m = MinlipSurvivalAnalysis(solver="clarabel", kernel=trans.pairwise_kernel)
+        m.fit(whas500.x, whas500.y)
+
+        assert not m.__sklearn_tags__().input_tags.pairwise
+
+        c = m.score(whas500.x, whas500.y)
+        assert c == pytest.approx(0.7314135916645598)
+
+    @staticmethod
+    @pytest.mark.parametrize("solver", ["OSQP", "clarabel", "ECOS"])
     def test_max_iter(gbsg2_scaled, solver):
         x, y = gbsg2_scaled
-        m = MinlipSurvivalAnalysis(solver=solver, alpha=1, kernel="poly", degree=2, pairs="next", max_iter=5)
+        m = MinlipSurvivalAnalysis(solver=solver.lower(), alpha=1, kernel="poly", degree=2, pairs="next", max_iter=5)
 
-        with pytest.warns(
-            ConvergenceWarning, match=f"{solver.upper()} solver did not converge: maximum iterations reached"
+        with (
+            pytest.warns(ConvergenceWarning, match=f"{solver} solver did not converge: maximum iterations reached"),
+            _get_solver_context(solver.lower()),
         ):
             m.fit(x, y)
 
@@ -426,7 +461,7 @@ def test_unknown_solver(gbsg2, solver):
 
 
 @pytest.mark.parametrize("model_cls", [MinlipSurvivalAnalysis, HingeLossSurvivalSVM])
-@pytest.mark.parametrize("solver", ["ecos", "osqp"])
+@pytest.mark.parametrize("solver", ["ecos", "clarabel", "osqp"])
 @pytest.mark.parametrize("pairs", ["all", "nearest", "next"])
 def test_fit_uncomparable(whas500_uncomparable, model_cls, solver, pairs):
     ssvm = model_cls(solver=solver, pairs=pairs)

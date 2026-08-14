@@ -1,4 +1,3 @@
-import numpy as np
 from numpy.testing import assert_array_equal
 import pandas as pd
 import pytest
@@ -7,20 +6,21 @@ from sksurv.datasets import load_whas500
 from sksurv.testing import all_survival_estimators
 
 
+@pytest.mark.filterwarnings("ignore:The 'ecos' solver will be removed in a future release.:FutureWarning")
 @pytest.mark.parametrize("estimator_cls", all_survival_estimators())
 def test_pandas_inputs(estimator_cls):
     X, y = load_whas500()
     X = X.iloc[:50]
     y = y[:50]
     X_df = X.loc[:, ["age", "bmi", "chf", "gender"]].astype(float)
-    X_np = X_df.values
+    X_np = X_df.to_numpy()
 
     estimator = estimator_cls()
     if "kernel" in estimator.get_params():
         estimator.set_params(kernel="rbf")
     estimator.fit(X_df, y)
     assert hasattr(estimator, "feature_names_in_")
-    assert_array_equal(estimator.feature_names_in_, np.asarray(X_df.columns, dtype=object))
+    assert_array_equal(estimator.feature_names_in_, X_df.columns.to_numpy(), strict=True)
     estimator.predict(X_df)
 
     msg = "Feature names must be in the same order as they were in fit"

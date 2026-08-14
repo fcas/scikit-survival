@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from os.path import dirname, join
-from typing import Optional
 
 import numpy as np
 from numpy.testing import assert_array_almost_equal
@@ -52,7 +51,10 @@ def nan_float_array():
 def assert_columns_almost_equal(actual, expected, decimal=6):
     for i, col in enumerate(expected.columns):
         assert_array_almost_equal(
-            expected.loc[:, col].values, actual.loc[:, col].values, decimal=decimal, err_msg="Column %d: %s" % (i, col)
+            expected.loc[:, col].to_numpy(),
+            actual.loc[:, col].to_numpy(),
+            decimal=decimal,
+            err_msg=f"Column {i:d}: {col}",
         )
 
 
@@ -68,8 +70,8 @@ def assert_predictions_equal(coxnet, x, expected_pred):
 class CoxnetExpectation:
     alphas: np.ndarray
     coef: pd.DataFrame
-    pred: Optional[np.ndarray] = None
-    dev: Optional[np.ndarray] = None
+    pred: None | np.ndarray = None
+    dev: None | np.ndarray = None
 
 
 class CoxnetCases(FixtureParameterFactory):
@@ -1088,7 +1090,7 @@ class CoxnetCases(FixtureParameterFactory):
 
         expected_coef = self.get_example_coef("2-std")
         expected_coef = pd.DataFrame(
-            expected_coef.values * scaler.scale_[:, np.newaxis],
+            expected_coef.to_numpy() * scaler.scale_[:, np.newaxis],
             columns=expected_coef.columns,
             index=expected_coef.index,
         )
@@ -1264,7 +1266,7 @@ def test_coxnet_fit_and_predict(params, x, y, expected):
     if expected.dev is not None:
         assert_array_almost_equal(coxnet.deviance_ratio_, expected.dev)
 
-    expected_offset = np.dot(np.mean(x.values, axis=0), coxnet.coef_)
+    expected_offset = np.dot(np.mean(x.to_numpy(), axis=0), coxnet.coef_)
     assert_array_almost_equal(coxnet.offset_, expected_offset)
 
     if expected.pred is not None:
@@ -1425,7 +1427,8 @@ class TestCoxnetSurvivalAnalysis:
     def test_predict_func_no_such_alpha(self):
         x, coxnet = self._fit(l1_ratio=0.9, n_alphas=11, alpha_min_ratio=0.001, fit_baseline_model=True)
 
-        for a in 1.0 + np.random.randn(100):
+        rng = np.random.default_rng()
+        for a in 1.0 + rng.standard_normal(100):
             with pytest.raises(ValueError, match=r"alpha must be one value of alphas_: \[.+"):
                 coxnet.predict_cumulative_hazard_function(x, alpha=a)
 
@@ -1719,7 +1722,7 @@ class TestCoxnetSurvivalAnalysis:
         x, y = breast_cancer
 
         coxnet = CoxnetSurvivalAnalysis(l1_ratio=1.0)
-        coxnet.fit(x.values, y)
+        coxnet.fit(x.to_numpy(), y)
 
         assert coxnet.alpha_min_ratio_ == 0.0001
 
@@ -1928,7 +1931,7 @@ class TestCoxnetSurvivalAnalysis:
         y = y[order[:80]]
 
         coxnet = CoxnetSurvivalAnalysis(l1_ratio=1.0)
-        coxnet.fit(x.values, y)
+        coxnet.fit(x.to_numpy(), y)
 
         assert coxnet.alpha_min_ratio_ == 0.01
 

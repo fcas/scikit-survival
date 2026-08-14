@@ -1,5 +1,5 @@
 import numpy as np
-from numpy.testing import assert_array_almost_equal, assert_array_equal
+from numpy.testing import assert_allclose, assert_array_almost_equal, assert_array_equal
 import pytest
 from scipy import sparse
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
@@ -21,8 +21,8 @@ FORESTS = [
 @pytest.mark.parametrize(
     "forest_cls, expected_c",
     [
-        (RandomSurvivalForest, (0.9026201280123488, 67831, 7318, 0, 14)),
-        (ExtraSurvivalTrees, (0.8389200122423452, 63044, 12105, 0, 14)),
+        (RandomSurvivalForest, (0.9009168452008676, 67703, 7446, 0, 14)),
+        (ExtraSurvivalTrees, (0.8400644053813091, 63130, 12019, 0, 14)),
     ],
 )
 def test_fit_predict(make_whas500, forest_cls, expected_c):
@@ -40,55 +40,42 @@ def test_fit_predict(make_whas500, forest_cls, expected_c):
     assert_cindex_almost_equal(whas500.y["fstat"], whas500.y["lenfol"], pred, expected_c)
 
 
-def test_fit_missing_values(make_whas500):
+@pytest.mark.parametrize(
+    "forest_cls,expected_cindex",
+    [(ExtraSurvivalTrees, 0.7722708130871396), (RandomSurvivalForest, 0.7625526401036605)],
+)
+def test_fit_missing_values(make_whas500, forest_cls, expected_cindex):
     whas500 = make_whas500(to_numeric=True)
 
-    rng = np.random.RandomState(42)
-    mask = rng.binomial(n=1, p=0.15, size=whas500.x.shape)
-    mask = mask.astype(bool)
     X = whas500.x.copy()
-    X[mask] = np.nan
-
     X_train, y_train = X[:400], whas500.y[:400]
     X_test, y_test = X[400:], whas500.y[400:]
 
-    forest = RandomSurvivalForest(random_state=42)
+    rng = np.random.default_rng(42)
+    mask = rng.binomial(n=1, p=0.15, size=X_train.shape)
+    mask = mask.astype(bool)
+    X_train[mask] = np.nan
+
+    forest = forest_cls(random_state=42)
     forest.fit(X_train, y_train)
 
-    tags = forest._get_tags()
-    assert tags["allow_nan"]
+    tags = forest.__sklearn_tags__()
+    assert tags.input_tags.allow_nan
 
     cindex = forest.score(X_test, y_test)
-    assert cindex == pytest.approx(0.7408487204405572)
+    assert cindex == pytest.approx(expected_cindex)
 
 
-def test_fit_missing_values_not_supported(make_whas500):
-    whas500 = make_whas500(to_numeric=True)
-
-    rng = np.random.RandomState(42)
-    mask = rng.binomial(n=1, p=0.15, size=whas500.x.shape)
-    mask = mask.astype(bool)
-    X = whas500.x.copy()
-    X[mask] = np.nan
-
-    forest = ExtraSurvivalTrees(random_state=42)
-    with pytest.raises(ValueError, match="Input X contains NaN"):
-        forest.fit(X, whas500.y)
-
-    tags = forest._get_tags()
-    assert not tags["allow_nan"]
-
-
-@pytest.mark.parametrize("forst_cls,allows_nan", [(ExtraTreesClassifier, False), (RandomForestClassifier, True)])
-def test_sklearn_random_forest_tags(forst_cls, allows_nan):
+@pytest.mark.parametrize("forst_cls", [ExtraTreesClassifier, RandomForestClassifier])
+def test_sklearn_random_forest_tags(forst_cls):
     est = forst_cls()
 
     # https://scikit-learn.org/stable/developers/develop.html#estimator-tags
-    tags = est._get_tags()
-    assert tags["multioutput"]
-    assert tags["requires_fit"]
-    assert tags["requires_y"]
-    assert tags["allow_nan"] is allows_nan
+    tags = est.__sklearn_tags__()
+    assert tags.target_tags.multi_output
+    assert tags.requires_fit
+    assert tags.target_tags.required
+    assert tags.input_tags.allow_nan
 
 
 @pytest.mark.parametrize("forest_cls", FORESTS)
@@ -143,7 +130,7 @@ def test_fit_predict_surv(make_whas500, forest_cls):
 
 
 @pytest.mark.parametrize(
-    "forest_cls, expected_oob_score", [(RandomSurvivalForest, 0.753010685), (ExtraSurvivalTrees, 0.752092510)]
+    "forest_cls, expected_oob_score", [(RandomSurvivalForest, 0.758732651), (ExtraSurvivalTrees, 0.751427165)]
 )
 def test_oob_score(make_whas500, forest_cls, expected_oob_score):
     whas500 = make_whas500(to_numeric=True)
@@ -157,6 +144,19 @@ def test_oob_score(make_whas500, forest_cls, expected_oob_score):
 
     assert forest.oob_prediction_.shape == (whas500.x.shape[0],)
     assert forest.oob_score_ == pytest.approx(expected_oob_score)
+
+
+@pytest.mark.parametrize("forest_cls", FORESTS)
+def test_fit_with_sample_weight(make_whas500, forest_cls):
+    whas500 = make_whas500(to_numeric=True)
+    sample_weight = np.linspace(0.1, 1.0, whas500.x.shape[0])
+
+    forest = forest_cls(oob_score=True, random_state=2)
+    forest.fit(whas500.x, whas500.y, sample_weight=sample_weight)
+
+    assert_array_equal(forest._sample_weight, sample_weight, strict=True)
+    assert forest.oob_prediction_.shape == (whas500.x.shape[0],)
+    assert np.isfinite(forest.oob_score_)
 
 
 @pytest.mark.parametrize("forest_cls", FORESTS)
@@ -253,6 +253,31 @@ def test_fit_with_small_max_samples(make_whas500, forest_cls):
 
 
 @pytest.mark.parametrize("forest_cls", FORESTS)
+def test_max_samples_without_bootstrap(make_whas500, forest_cls):
+    whas500 = make_whas500(to_numeric=True)
+
+    est = forest_cls(n_estimators=1, random_state=1, bootstrap=False, max_samples=10)
+    msg = (
+        r"`max_sample` cannot be set if `bootstrap=False`\. "
+        r"Either switch to `bootstrap=True` or set `max_sample=None`\."
+    )
+    with pytest.raises(ValueError, match=msg):
+        est.fit(whas500.x, whas500.y)
+
+
+@pytest.mark.parametrize("forest_cls", FORESTS)
+def test_estimators_samples(make_whas500, forest_cls):
+    whas500 = make_whas500(to_numeric=True)
+
+    est = forest_cls(n_estimators=10, max_samples=333, random_state=1, low_memory=True)
+    est.fit(whas500.x, whas500.y)
+
+    n_samples = [len(np.unique(arr)) for arr in est.estimators_samples_]
+    expected = np.array([255, 227, 245, 247, 246, 239, 254, 252, 245, 248])
+    assert_array_equal(n_samples, expected, strict=True)
+
+
+@pytest.mark.parametrize("forest_cls", FORESTS)
 @pytest.mark.parametrize("func", ["predict_survival_function", "predict_cumulative_hazard_function"])
 def test_pipeline_predict(breast_cancer, forest_cls, func):
     X_str, _ = load_breast_cancer()
@@ -274,9 +299,6 @@ def test_pipeline_predict(breast_cancer, forest_cls, func):
 @pytest.mark.parametrize(
     "max_samples, exc_type, exc_msg, with_prefix",
     [
-        (int(1e9), ValueError, "`max_samples` must be <= n_samples=500 but got value 1000000000", False),
-        (1.0 + 1e-7, ValueError, r"Got 1\.0000001 instead", True),
-        (2.0, ValueError, r"Got 2\.0 instead", True),
         (0.0, ValueError, r"Got 0\.0 instead", True),
         (np.nan, ValueError, "Got nan instead", True),
         (np.inf, ValueError, r"Got inf instead", True),
@@ -290,7 +312,7 @@ def test_fit_max_samples(make_whas500, forest_cls, max_samples, exc_type, exc_ms
     forest = forest_cls(max_samples=max_samples)
     prefix = (
         f"The 'max_samples' parameter of {forest_cls.__name__} must be None, "
-        r"a float in the range \(0\.0, 1\.0] or an int in the range \[1, inf\)\. "
+        r"a float in the range \(0\.0, inf\) or an int in the range \[1, inf\)\. "
     )
     if with_prefix:
         msg = prefix + exc_msg
@@ -298,6 +320,21 @@ def test_fit_max_samples(make_whas500, forest_cls, max_samples, exc_type, exc_ms
         msg = exc_msg
     with pytest.raises(exc_type, match=msg):
         forest.fit(whas500.x, whas500.y)
+
+
+@pytest.mark.parametrize("forest_cls", FORESTS)
+def test_max_samples_geq_one(make_whas500, forest_cls):
+    # Check that `max_samples >= 1.0` and `max_samples >= n_samples` is allowed
+    whas500 = make_whas500(to_numeric=True)
+    X, y = whas500.x, whas500.y
+    max_samples_float = 1.5
+    max_sample_int = int(max_samples_float * whas500.x.shape[0])
+    est1 = forest_cls(bootstrap=True, max_samples=max_samples_float, random_state=123)
+    est1.fit(X, y)
+    est2 = forest_cls(bootstrap=True, max_samples=max_sample_int, random_state=123)
+    est2.fit(X, y)
+    assert est1._n_samples_bootstrap == est2._n_samples_bootstrap
+    assert_allclose(est1.score(X, y), est2.score(X, y))
 
 
 @pytest.mark.parametrize("forest_cls", FORESTS)
@@ -338,7 +375,7 @@ def test_apply_sparse(make_whas500, forest_cls):
 
     forest = forest_cls()
     X, y = whas500.x, whas500.y
-    X_csr = sparse.csr_matrix(X)
+    X_csr = sparse.csr_array(X)
     forest.fit(X_csr, y)
 
     X_trans = forest.apply(X_csr)
@@ -356,7 +393,7 @@ def test_predict_sparse(make_whas500, forest_cls):
     seed = 42
     whas500 = make_whas500(to_numeric=True)
     X, y = whas500.x, whas500.y
-    X = np.random.RandomState(seed).binomial(n=5, p=0.1, size=X.shape)
+    X = np.random.default_rng(seed).binomial(n=5, p=0.1, size=X.shape)
 
     X_train, X_test, y_train, _ = train_test_split(X, y, random_state=seed)
 
@@ -366,8 +403,8 @@ def test_predict_sparse(make_whas500, forest_cls):
     y_cum_h = forest.predict_cumulative_hazard_function(X_test)
     y_surv = forest.predict_survival_function(X_test)
 
-    X_train_csr = sparse.csr_matrix(X_train)
-    X_test_csr = sparse.csr_matrix(X_test)
+    X_train_csr = sparse.csr_array(X_train)
+    X_test_csr = sparse.csr_array(X_test)
 
     forest_csr = forest_cls(random_state=seed)
     forest_csr.fit(X_train_csr, y_train)
@@ -378,9 +415,9 @@ def test_predict_sparse(make_whas500, forest_cls):
     assert y_pred.shape[0] == X_test.shape[0]
     assert y_pred_csr.shape[0] == X_test.shape[0]
 
-    assert_array_equal(y_pred, y_pred_csr)
-    assert_array_equal(y_cum_h_csr, y_cum_h)
-    assert_array_equal(y_surv, y_surv_csr)
+    assert_array_equal(y_pred, y_pred_csr, strict=True)
+    assert_array_equal(y_cum_h_csr, y_cum_h, strict=True)
+    assert_array_equal(y_surv, y_surv_csr, strict=True)
 
 
 @pytest.mark.parametrize(

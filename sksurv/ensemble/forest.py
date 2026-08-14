@@ -1,3 +1,19 @@
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+"""
+Forest-based survival estimators.
+"""
+
 from abc import ABCMeta, abstractmethod
 from functools import partial
 import threading
@@ -6,18 +22,19 @@ import warnings
 from joblib import Parallel, delayed
 import numpy as np
 from sklearn.ensemble._base import _partition_estimators
+from sklearn.ensemble._bootstrap import _get_n_samples_bootstrap
 from sklearn.ensemble._forest import (
     BaseForest,
     _accumulate_prediction,
     _generate_unsampled_indices,
-    _get_n_samples_bootstrap,
     _parallel_build_trees,
 )
-from sklearn.tree._tree import DTYPE
-from sklearn.utils._tags import _safe_tags
-from sklearn.utils.validation import check_is_fitted, check_random_state
+from sklearn.utils._tags import get_tags
+from sklearn.utils.validation import _check_sample_weight, check_is_fitted, check_random_state, validate_data
 
+from .._dataframe import ensure_eager_dataframe
 from ..base import SurvivalAnalysisMixin
+from ..docstrings import append_cumulative_hazard_example, append_survival_function_example
 from ..metrics import concordance_index_censored
 from ..tree import ExtraSurvivalTree, SurvivalTree
 from ..tree._criterion import get_unique_times
@@ -29,18 +46,20 @@ __all__ = ["RandomSurvivalForest", "ExtraSurvivalTrees"]
 MAX_INT = np.iinfo(np.int32).max
 
 
-def _more_tags_patch(self):
-    # BaseForest._more_tags calls
+def _sklearn_tags_patch(self):
+    # BaseForest.__sklearn_tags__ calls
     # type(self.estimator)(criterion=self.criterions),
     # which is incompatible with LogrankCriterion
     if isinstance(self, _BaseSurvivalForest):
         estimator = type(self.estimator)()
     else:
         estimator = type(self.estimator)(criterion=self.criterion)
-    return {"allow_nan": _safe_tags(estimator, key="allow_nan")}
+    tags = super(BaseForest, self).__sklearn_tags__()
+    tags.input_tags.allow_nan = get_tags(estimator).input_tags.allow_nan
+    return tags
 
 
-BaseForest._more_tags = _more_tags_patch
+BaseForest.__sklearn_tags__ = _sklearn_tags_patch
 
 
 class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
@@ -82,30 +101,42 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
 
     @property
     def feature_importances_(self):
-        """Not implemented"""
+        """Not implemented."""
         raise NotImplementedError()
 
     def fit(self, X, y, sample_weight=None):
-        """Build a forest of survival trees from the training set (X, y).
+        """
+        Build a forest of survival trees from the training set (X, y).
 
         Parameters
         ----------
         X : array-like, shape = (n_samples, n_features)
-            Data matrix
+            Data matrix.
 
         y : structured array, shape = (n_samples,)
-            A structured array containing the binary event indicator
-            as first field, and time of event or time of censoring as
-            second field.
+            A structured array with two fields. The first field is a boolean
+            where ``True`` indicates an event and ``False`` indicates right-censoring.
+            The second field is a float with the time of event or time of censoring.
 
         Returns
         -------
-        self
+        object
+            Fitted estimator.
         """
         self._validate_params()
 
-        X = self._validate_data(X, dtype=DTYPE, accept_sparse="csc", ensure_min_samples=2, force_all_finite=False)
+        X = validate_data(
+            self,
+            ensure_eager_dataframe(X),
+            dtype=np.float32,
+            accept_sparse="csc",
+            ensure_min_samples=2,
+            ensure_all_finite=False,
+        )
         event, time = check_array_survival(X, y)
+        if sample_weight is not None:
+            sample_weight = _check_sample_weight(sample_weight, X)
+        self._sample_weight = sample_weight
 
         # _compute_missing_values_in_feature_mask checks if X has missing values and
         # will raise an error if the underlying tree base estimator can't handle missing
@@ -115,7 +146,7 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
             X, estimator_name=self.__class__.__name__
         )
 
-        self.n_features_in_ = X.shape[1]
+        self._n_samples, self.n_features_in_ = X.shape
         time = time.astype(np.float64)
         self.unique_times_, self.is_event_time_ = get_unique_times(time, event)
         self.n_outputs_ = self.unique_times_.shape[0]
@@ -125,7 +156,22 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
         y_numeric[:, 1] = event.astype(np.float64)
 
         # Get bootstrap sample size
-        n_samples_bootstrap = _get_n_samples_bootstrap(n_samples=X.shape[0], max_samples=self.max_samples)
+        if not self.bootstrap and self.max_samples is not None:  # pylint: disable=no-else-raise
+            raise ValueError(
+                "`max_sample` cannot be set if `bootstrap=False`. "
+                "Either switch to `bootstrap=True` or set "
+                "`max_sample=None`."
+            )
+        elif self.bootstrap:
+            n_samples_bootstrap = _get_n_samples_bootstrap(
+                n_samples=X.shape[0],
+                max_samples=self.max_samples,
+                sample_weight=sample_weight,
+            )
+        else:
+            n_samples_bootstrap = None
+
+        self._n_samples_bootstrap = n_samples_bootstrap
 
         # Check parameters
         self._validate_estimator()
@@ -141,13 +187,12 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
 
         n_more_estimators = self.n_estimators - len(self.estimators_)
 
-        if n_more_estimators < 0:
+        if n_more_estimators < 0:  # pylint: disable=no-else-raise
             raise ValueError(
                 f"n_estimators={self.n_estimators} must be larger or equal to "
                 f"len(estimators_)={len(self.estimators_)} when warm_start==True"
             )
-
-        if n_more_estimators == 0:
+        elif n_more_estimators == 0:
             warnings.warn("Warm-start fitting without increasing n_estimators does not fit new trees.", stacklevel=2)
         else:
             if self.warm_start and len(self.estimators_) > 0:
@@ -174,7 +219,7 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
                     self.bootstrap,
                     X,
                     y_tree,
-                    sample_weight,
+                    self._sample_weight,
                     i,
                     len(trees),
                     verbose=self.verbose,
@@ -200,10 +245,15 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
         predictions = np.zeros(n_samples)
         n_predictions = np.zeros(n_samples)
 
-        n_samples_bootstrap = _get_n_samples_bootstrap(n_samples, self.max_samples)
+        n_samples_bootstrap = _get_n_samples_bootstrap(n_samples, self.max_samples, self._sample_weight)
 
         for estimator in self.estimators_:
-            unsampled_indices = _generate_unsampled_indices(estimator.random_state, n_samples, n_samples_bootstrap)
+            unsampled_indices = _generate_unsampled_indices(
+                estimator.random_state,
+                n_samples,
+                n_samples_bootstrap,
+                self._sample_weight,
+            )
             p_estimator = estimator.predict(X[unsampled_indices, :], check_input=False)
 
             predictions[unsampled_indices] += p_estimator
@@ -226,7 +276,7 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
     def _predict(self, predict_fn, X):
         check_is_fitted(self, "estimators_")
         # Check data
-        X = self._validate_X_predict(X)
+        X = self._validate_X_predict(ensure_eager_dataframe(X))
 
         # Assign chunk of trees to jobs
         n_jobs, _, _ = _partition_estimators(self.n_estimators, self.n_jobs)
@@ -254,15 +304,16 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
         return y_hat
 
     def predict(self, X):
-        """Predict risk score.
+        r"""
+        Predict risk score.
 
         The ensemble risk score is the total number of events,
         which can be estimated by the sum of the estimated
-        ensemble cumulative hazard function :math:`\\hat{H}_e`.
+        ensemble cumulative hazard function :math:`\hat{H}_e`.
 
         .. math::
 
-            \\sum_{j=1}^{n} \\hat{H}_e(T_{j} \\mid x) ,
+            \sum_{j=1}^{n} \hat{H}_e(T_{j} \mid x) ,
 
         where :math:`n` denotes the total number of distinct
         event times in the training data.
@@ -274,7 +325,7 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
 
         Returns
         -------
-        risk_scores : ndarray, shape = (n_samples,)
+        ndarray, shape = (n_samples,)
             Predicted risk scores.
         """
         return self._predict("predict", X)
@@ -293,7 +344,8 @@ class _BaseSurvivalForest(BaseForest, metaclass=ABCMeta):
 
 
 class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
-    """A random survival forest.
+    """
+    A random survival forest.
 
     A random survival forest is a meta estimator that fits a number of
     survival trees on various sub-samples of the dataset and uses
@@ -310,7 +362,7 @@ class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
 
     Parameters
     ----------
-    n_estimators : integer, optional, default: 100
+    n_estimators : int, optional, default: 100
         The number of trees in the forest.
 
     max_depth : int or None, optional, default: None
@@ -338,12 +390,12 @@ class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
           `ceil(min_samples_leaf * n_samples)` are the minimum
           number of samples for each node.
 
-    min_weight_fraction_leaf : float, optional, default: 0.
+    min_weight_fraction_leaf : float, optional, default: 0.0
         The minimum weighted fraction of the sum total of weights (of all
         the input samples) required to be at a leaf node. Samples have
         equal weight when sample_weight is not provided.
 
-    max_features : int, float, string or None, optional, default: None
+    max_features : int, float, {'sqrt', 'log2'} or None, optional, default: 'sqrt'
         The number of features to consider when looking for the best split:
 
         - If int, then consider `max_features` features at each split.
@@ -363,11 +415,11 @@ class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
         Best nodes are defined as relative reduction in impurity.
         If None then unlimited number of leaf nodes.
 
-    bootstrap : boolean, optional, default: True
+    bootstrap : bool, optional, default: True
         Whether bootstrap samples are used when building trees. If False, the
         whole dataset is used to build each tree.
 
-    oob_score : bool, default: False
+    oob_score : bool, optional, default: False
         Whether to use out-of-bag samples to estimate
         the generalization accuracy.
 
@@ -395,27 +447,28 @@ class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
         If bootstrap is True, the number of samples to draw from X
         to train each base estimator.
 
-        - If None (default), then draw `X.shape[0]` samples.
+        - If None (default), then draw `X.shape[0]` samples irrespective of
+          `sample_weight`.
         - If int, then draw `max_samples` samples.
-        - If float, then draw `max_samples * X.shape[0]` samples. Thus,
-          `max_samples` should be in the interval `(0.0, 1.0]`.
+        - If float, then draw `max_samples * X.shape[0]` unweighted samples
+          or `max_samples * sample_weight.sum()` weighted samples.
 
-    low_memory : boolean, default: False
-        If set, ``predict`` computations use reduced memory but ``predict_cumulative_hazard_function``
-        and ``predict_survival_function`` are not implemented.
+    low_memory : bool, optional, default: False
+        If set, :meth:`predict` computations use reduced memory but :meth:`predict_cumulative_hazard_function`
+        and :meth:`predict_survival_function` are not implemented.
 
     Attributes
     ----------
     estimators_ : list of SurvivalTree instances
         The collection of fitted sub-estimators.
 
-    unique_times_ : array of shape = (n_unique_times,)
+    unique_times_ : ndarray, shape = (n_unique_times,)
         Unique time points.
 
     n_features_in_ : int
         Number of features seen during ``fit``.
 
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+    feature_names_in_ : ndarray, shape = (`n_features_in_`,)
         Names of features seen during ``fit``. Defined only when `X`
         has feature names that are all strings.
 
@@ -423,7 +476,7 @@ class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
         Concordance index of the training dataset obtained
         using an out-of-bag estimate.
 
-    See also
+    See Also
     --------
     sksurv.tree.SurvivalTree
         A single survival tree.
@@ -442,7 +495,7 @@ class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
     `min_impurity_decrease` or `min_impurity_split` are absent.
     In addition, the `feature_importances_` attribute is not available.
     It is recommended to estimate feature importances via
-    `permutation-based methods <https://eli5.readthedocs.io>`_.
+    :func:`sklearn.inspection.permutation_importance`.
 
     The features are always randomly permuted at each split. Therefore,
     the best found split may vary, even with the same training data,
@@ -515,8 +568,10 @@ class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
         self.max_leaf_nodes = max_leaf_nodes
         self.low_memory = low_memory
 
+    @append_cumulative_hazard_example(estimator_mod="ensemble", estimator_class="RandomSurvivalForest")
     def predict_cumulative_hazard_function(self, X, return_array=False):
-        """Predict cumulative hazard function.
+        """
+        Predict cumulative hazard function.
 
         For each tree in the ensemble, the cumulative hazard
         function (CHF) for an individual with feature vector
@@ -532,49 +587,36 @@ class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
         X : array-like, shape = (n_samples, n_features)
             Data matrix.
 
-        return_array : boolean, default: False
-            If set, return an array with the cumulative hazard rate
-            for each `self.unique_times_`, otherwise an array of
-            :class:`sksurv.functions.StepFunction`.
+        return_array : bool, default: False
+            Whether to return a single array of cumulative hazard values
+            or a list of step functions.
+
+            If `False`, a list of :class:`sksurv.functions.StepFunction`
+            objects is returned.
+
+            If `True`, a 2d-array of shape `(n_samples, n_unique_times)` is
+            returned, where `n_unique_times` is the number of unique
+            event times in the training data. Each row represents the cumulative
+            hazard function of an individual evaluated at `unique_times_`.
 
         Returns
         -------
-        cum_hazard : ndarray
-            If `return_array` is set, an array with the cumulative hazard rate
-            for each `self.unique_times_`, otherwise an array of length `n_samples`
-            of :class:`sksurv.functions.StepFunction` instances will be returned.
+        ndarray
+            If `return_array` is `False`, an array of `n_samples`
+            :class:`sksurv.functions.StepFunction` instances is returned.
+
+            If `return_array` is `True`, a numeric array of shape
+            `(n_samples, n_unique_times_)` is returned.
 
         Examples
         --------
-        >>> import matplotlib.pyplot as plt
-        >>> from sksurv.datasets import load_whas500
-        >>> from sksurv.ensemble import RandomSurvivalForest
-
-        Load and prepare the data.
-
-        >>> X, y = load_whas500()
-        >>> X = X.astype(float)
-
-        Fit the model.
-
-        >>> estimator = RandomSurvivalForest().fit(X, y)
-
-        Estimate the cumulative hazard function for the first 5 samples.
-
-        >>> chf_funcs = estimator.predict_cumulative_hazard_function(X.iloc[:5])
-
-        Plot the estimated cumulative hazard functions.
-
-        >>> for fn in chf_funcs:
-        ...    plt.step(fn.x, fn(fn.x), where="post")
-        ...
-        >>> plt.ylim(0, 1)
-        >>> plt.show()
         """
         return super().predict_cumulative_hazard_function(X, return_array)
 
+    @append_survival_function_example(estimator_mod="ensemble", estimator_class="RandomSurvivalForest")
     def predict_survival_function(self, X, return_array=False):
-        """Predict survival function.
+        """
+        Predict survival function.
 
         For each tree in the ensemble, the survival function
         for an individual with feature vector :math:`x` is
@@ -590,51 +632,36 @@ class RandomSurvivalForest(SurvivalAnalysisMixin, _BaseSurvivalForest):
         X : array-like, shape = (n_samples, n_features)
             Data matrix.
 
-        return_array : boolean
-            If set, return an array with the probability
-            of survival for each `self.unique_times_`,
-            otherwise an array of :class:`sksurv.functions.StepFunction`.
+        return_array : bool, default: False
+            Whether to return a single array of survival probabilities
+            or a list of step functions.
+
+            If `False`, a list of :class:`sksurv.functions.StepFunction`
+            objects is returned.
+
+            If `True`, a 2d-array of shape `(n_samples, n_unique_times)` is
+            returned, where `n_unique_times` is the number of unique
+            event times in the training data. Each row represents the survival
+            function of an individual evaluated at `unique_times_`.
 
         Returns
         -------
-        survival : ndarray
-            If `return_array` is set, an array with the probability
-            of survival for each `self.unique_times_`,
-            otherwise an array of :class:`sksurv.functions.StepFunction`
-            will be returned.
+        ndarray
+            If `return_array` is `False`, an array of `n_samples`
+            :class:`sksurv.functions.StepFunction` instances is returned.
+
+            If `return_array` is `True`, a numeric array of shape
+            `(n_samples, n_unique_times_)` is returned.
 
         Examples
         --------
-        >>> import matplotlib.pyplot as plt
-        >>> from sksurv.datasets import load_whas500
-        >>> from sksurv.ensemble import RandomSurvivalForest
-
-        Load and prepare the data.
-
-        >>> X, y = load_whas500()
-        >>> X = X.astype(float)
-
-        Fit the model.
-
-        >>> estimator = RandomSurvivalForest().fit(X, y)
-
-        Estimate the survival function for the first 5 samples.
-
-        >>> surv_funcs = estimator.predict_survival_function(X.iloc[:5])
-
-        Plot the estimated survival functions.
-
-        >>> for fn in surv_funcs:
-        ...    plt.step(fn.x, fn(fn.x), where="post")
-        ...
-        >>> plt.ylim(0, 1)
-        >>> plt.show()
         """
         return super().predict_survival_function(X, return_array)
 
 
-class ExtraSurvivalTrees(_BaseSurvivalForest):
-    """An extremely random survival forest.
+class ExtraSurvivalTrees(SurvivalAnalysisMixin, _BaseSurvivalForest):
+    """
+    An extremely random survival forest.
 
     This class implements a meta estimator that fits a number of randomized
     survival trees (a.k.a. extra-trees) on various sub-samples of the dataset
@@ -655,7 +682,7 @@ class ExtraSurvivalTrees(_BaseSurvivalForest):
 
     Parameters
     ----------
-    n_estimators : integer, optional, default: 100
+    n_estimators : int, optional, default: 100
         The number of trees in the forest.
 
     max_depth : int or None, optional, default: None
@@ -683,12 +710,12 @@ class ExtraSurvivalTrees(_BaseSurvivalForest):
           `ceil(min_samples_leaf * n_samples)` are the minimum
           number of samples for each node.
 
-    min_weight_fraction_leaf : float, optional, default: 0.
+    min_weight_fraction_leaf : float, optional, default: 0.0
         The minimum weighted fraction of the sum total of weights (of all
         the input samples) required to be at a leaf node. Samples have
         equal weight when sample_weight is not provided.
 
-    max_features : int, float, string or None, optional, default: None
+    max_features : int, float, {'sqrt', 'log2'} or None, optional, default: 'sqrt'
         The number of features to consider when looking for the best split:
 
         - If int, then consider `max_features` features at each split.
@@ -708,11 +735,11 @@ class ExtraSurvivalTrees(_BaseSurvivalForest):
         Best nodes are defined as relative reduction in impurity.
         If None then unlimited number of leaf nodes.
 
-    bootstrap : boolean, optional, default: True
+    bootstrap : bool, optional, default: True
         Whether bootstrap samples are used when building trees. If False, the
         whole dataset is used to build each tree.
 
-    oob_score : bool, default: False
+    oob_score : bool, optional, default: False
         Whether to use out-of-bag samples to estimate
         the generalization accuracy.
 
@@ -740,27 +767,28 @@ class ExtraSurvivalTrees(_BaseSurvivalForest):
         If bootstrap is True, the number of samples to draw from X
         to train each base estimator.
 
-        - If None (default), then draw `X.shape[0]` samples.
+        - If None (default), then draw `X.shape[0]` samples irrespective of
+          `sample_weight`.
         - If int, then draw `max_samples` samples.
-        - If float, then draw `max_samples * X.shape[0]` samples. Thus,
-          `max_samples` should be in the interval `(0.0, 1.0]`.
+        - If float, then draw `max_samples * X.shape[0]` unweighted samples
+          or `max_samples * sample_weight.sum()` weighted samples.
 
-    low_memory : boolean, default: False
-        If set, ``predict`` computations use reduced memory but ``predict_cumulative_hazard_function``
-        and ``predict_survival_function`` are not implemented.
+    low_memory : bool, optional, default: False
+        If set, :meth:`predict` computations use reduced memory but :meth:`predict_cumulative_hazard_function`
+        and :meth:`predict_survival_function` are not implemented.
 
     Attributes
     ----------
     estimators_ : list of SurvivalTree instances
         The collection of fitted sub-estimators.
 
-    unique_times_ : array of shape = (n_unique_times,)
+    unique_times_ : ndarray, shape = (n_unique_times,)
         Unique time points.
 
     n_features_in_ : int
-        The number of features when ``fit`` is performed.
+        Number of features seen during ``fit``.
 
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+    feature_names_in_ : ndarray, shape = (`n_features_in_`,)
         Names of features seen during ``fit``. Defined only when `X`
         has feature names that are all strings.
 
@@ -768,7 +796,7 @@ class ExtraSurvivalTrees(_BaseSurvivalForest):
         Concordance index of the training dataset obtained
         using an out-of-bag estimate.
 
-    See also
+    See Also
     --------
     sksurv.tree.SurvivalTree
         A single survival tree.
@@ -829,8 +857,10 @@ class ExtraSurvivalTrees(_BaseSurvivalForest):
         self.max_leaf_nodes = max_leaf_nodes
         self.low_memory = low_memory
 
+    @append_cumulative_hazard_example(estimator_mod="ensemble", estimator_class="ExtraSurvivalTrees")
     def predict_cumulative_hazard_function(self, X, return_array=False):
-        """Predict cumulative hazard function.
+        """
+        Predict cumulative hazard function.
 
         For each tree in the ensemble, the cumulative hazard
         function (CHF) for an individual with feature vector
@@ -846,49 +876,36 @@ class ExtraSurvivalTrees(_BaseSurvivalForest):
         X : array-like, shape = (n_samples, n_features)
             Data matrix.
 
-        return_array : boolean, default: False
-            If set, return an array with the cumulative hazard rate
-            for each `self.unique_times_`, otherwise an array of
-            :class:`sksurv.functions.StepFunction`.
+        return_array : bool, default: False
+            Whether to return a single array of cumulative hazard values
+            or a list of step functions.
+
+            If `False`, a list of :class:`sksurv.functions.StepFunction`
+            objects is returned.
+
+            If `True`, a 2d-array of shape `(n_samples, n_unique_times)` is
+            returned, where `n_unique_times` is the number of unique
+            event times in the training data. Each row represents the cumulative
+            hazard function of an individual evaluated at `unique_times_`.
 
         Returns
         -------
-        cum_hazard : ndarray
-            If `return_array` is set, an array with the cumulative hazard rate
-            for each `self.unique_times_`, otherwise an array of length `n_samples`
-            of :class:`sksurv.functions.StepFunction` instances will be returned.
+        ndarray
+            If `return_array` is `False`, an array of `n_samples`
+            :class:`sksurv.functions.StepFunction` instances is returned.
+
+            If `return_array` is `True`, a numeric array of shape
+            `(n_samples, n_unique_times_)` is returned.
 
         Examples
         --------
-        >>> import matplotlib.pyplot as plt
-        >>> from sksurv.datasets import load_whas500
-        >>> from sksurv.ensemble import ExtraSurvivalTrees
-
-        Load and prepare the data.
-
-        >>> X, y = load_whas500()
-        >>> X = X.astype(float)
-
-        Fit the model.
-
-        >>> estimator = ExtraSurvivalTrees().fit(X, y)
-
-        Estimate the cumulative hazard function for the first 5 samples.
-
-        >>> chf_funcs = estimator.predict_cumulative_hazard_function(X.iloc[:5])
-
-        Plot the estimated cumulative hazard functions.
-
-        >>> for fn in chf_funcs:
-        ...    plt.step(fn.x, fn(fn.x), where="post")
-        ...
-        >>> plt.ylim(0, 1)
-        >>> plt.show()
         """
         return super().predict_cumulative_hazard_function(X, return_array)
 
+    @append_survival_function_example(estimator_mod="ensemble", estimator_class="ExtraSurvivalTrees")
     def predict_survival_function(self, X, return_array=False):
-        """Predict survival function.
+        """
+        Predict survival function.
 
         For each tree in the ensemble, the survival function
         for an individual with feature vector :math:`x` is
@@ -904,44 +921,28 @@ class ExtraSurvivalTrees(_BaseSurvivalForest):
         X : array-like, shape = (n_samples, n_features)
             Data matrix.
 
-        return_array : boolean, default: False
-            If set, return an array with the probability
-            of survival for each `self.unique_times_`,
-            otherwise an array of :class:`sksurv.functions.StepFunction`.
+        return_array : bool, default: False
+            Whether to return a single array of survival probabilities
+            or a list of step functions.
+
+            If `False`, a list of :class:`sksurv.functions.StepFunction`
+            objects is returned.
+
+            If `True`, a 2d-array of shape `(n_samples, n_unique_times)` is
+            returned, where `n_unique_times` is the number of unique
+            event times in the training data. Each row represents the survival
+            function of an individual evaluated at `unique_times_`.
 
         Returns
         -------
-        survival : ndarray
-            If `return_array` is set, an array with the probability of
-            survival for each `self.unique_times_`, otherwise an array of
-            length `n_samples` of :class:`sksurv.functions.StepFunction`
-            instances will be returned.
+        ndarray
+            If `return_array` is `False`, an array of `n_samples`
+            :class:`sksurv.functions.StepFunction` instances is returned.
+
+            If `return_array` is `True`, a numeric array of shape
+            `(n_samples, n_unique_times_)` is returned.
 
         Examples
         --------
-        >>> import matplotlib.pyplot as plt
-        >>> from sksurv.datasets import load_whas500
-        >>> from sksurv.ensemble import ExtraSurvivalTrees
-
-        Load and prepare the data.
-
-        >>> X, y = load_whas500()
-        >>> X = X.astype(float)
-
-        Fit the model.
-
-        >>> estimator = ExtraSurvivalTrees().fit(X, y)
-
-        Estimate the survival function for the first 5 samples.
-
-        >>> surv_funcs = estimator.predict_survival_function(X.iloc[:5])
-
-        Plot the estimated survival functions.
-
-        >>> for fn in surv_funcs:
-        ...    plt.step(fn.x, fn(fn.x), where="post")
-        ...
-        >>> plt.ylim(0, 1)
-        >>> plt.show()
         """
         return super().predict_survival_function(X, return_array)

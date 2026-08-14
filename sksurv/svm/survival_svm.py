@@ -10,6 +10,10 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+"""
+Fast implementations of the survival SVM.
+"""
+
 from abc import ABCMeta, abstractmethod
 from numbers import Integral, Real
 import warnings
@@ -20,11 +24,18 @@ from scipy.optimize import minimize
 from sklearn.base import BaseEstimator
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics.pairwise import PAIRWISE_KERNEL_FUNCTIONS, pairwise_kernels
-from sklearn.utils import check_array, check_consistent_length, check_random_state, check_X_y
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.extmath import safe_sparse_dot, squared_norm
-from sklearn.utils.validation import check_is_fitted
+from sklearn.utils.validation import (
+    check_array,
+    check_consistent_length,
+    check_is_fitted,
+    check_random_state,
+    check_X_y,
+    validate_data,
+)
 
+from .._dataframe import ensure_eager_dataframe
 from ..base import SurvivalAnalysisMixin
 from ..bintrees import AVLTree, RBTree
 from ..exceptions import NoComparablePairException
@@ -32,7 +43,7 @@ from ..util import check_array_survival
 from ._prsvm import survival_constraints_simple, survival_constraints_with_support_vectors
 
 
-class Counter(metaclass=ABCMeta):
+class _Counter(metaclass=ABCMeta):
     @abstractmethod
     def __init__(self, x, y, status, time=None):
         self.x, self.y = check_X_y(x, y)
@@ -59,16 +70,17 @@ class Counter(metaclass=ABCMeta):
 
     @abstractmethod
     def calculate(self, v):
-        """Return l_plus, xv_plus, l_minus, xv_minus"""
+        """Return l_plus, xv_plus, l_minus, xv_minus."""
 
 
-class OrderStatisticTreeSurvivalCounter(Counter):
-    """Counting method used by :class:`LargeScaleOptimizer` for survival analysis.
+class _OrderStatisticTreeSurvivalCounter(_Counter):
+    """
+    Counting method used by :class:`LargeScaleOptimizer` for survival analysis.
 
     Parameters
     ----------
     x : array, shape = (n_samples, n_features)
-        Feature matrix
+        Feature matrix.
 
     y : array of int, shape = (n_samples,)
         Unique ranks of samples, starting with 0.
@@ -77,7 +89,8 @@ class OrderStatisticTreeSurvivalCounter(Counter):
         Event indicator of samples.
 
     tree_class : type
-        Which class to use as order statistic tree
+        The class to use as an order statistic tree, either
+        :class:`sksurv.bintrees.AVLTree` or :class:`sksurv.bintrees.RBTree`.
 
     time : array, shape = (n_samples,)
         Survival times.
@@ -128,13 +141,13 @@ class OrderStatisticTreeSurvivalCounter(Counter):
         return l_plus, xv_plus, l_minus, xv_minus
 
 
-class SurvivalCounter(Counter):
+class _SurvivalCounter(_Counter):
     def __init__(self, x, y, status, n_relevance_levels, time=None):
         super().__init__(x, y, status, time)
         self.n_relevance_levels = n_relevance_levels
 
     def _count_values(self):
-        """Return dict mapping relevance level to sample index"""
+        """Return dict mapping relevance level to sample index."""
         indices = {yi: [i] for i, yi in enumerate(self.y) if self.status[i]}
 
         return indices
@@ -178,8 +191,8 @@ class SurvivalCounter(Counter):
         return l_plus, xv_plus, l_minus, xv_minus
 
 
-class RankSVMOptimizer(metaclass=ABCMeta):
-    """Abstract base class for all optimizers"""
+class _RankSVMOptimizer(metaclass=ABCMeta):
+    """Abstract base class for all optimizers."""
 
     def __init__(self, alpha, rank_ratio, timeit=False):
         self.alpha = alpha
@@ -193,24 +206,24 @@ class RankSVMOptimizer(metaclass=ABCMeta):
 
     @abstractmethod
     def _objective_func(self, w):
-        """Evaluate objective function at w"""
+        """Evaluate objective function at w."""
 
     @abstractmethod
     def _update_constraints(self, w):
-        """Update constraints"""
+        """Update constraints."""
 
     @abstractmethod
     def _gradient_func(self, w):
-        """Evaluate gradient at w"""
+        """Evaluate gradient at w."""
 
     @abstractmethod
     def _hessian_func(self, w, s):
-        """Evaluate Hessian at w"""
+        """Evaluate Hessian at w."""
 
     @property
     @abstractmethod
     def n_coefficients(self):
-        """Return number of coefficients (includes intercept)"""
+        """Return number of coefficients (includes intercept)."""
 
     def _update_constraints_if_necessary(self, w):
         needs_update = (w != self._last_w).any()
@@ -271,8 +284,8 @@ class RankSVMOptimizer(metaclass=ABCMeta):
         return opt_result
 
 
-class SimpleOptimizer(RankSVMOptimizer):
-    """Simple optimizer, which explicitly constructs matrix of all pairs of samples"""
+class _SimpleOptimizer(_RankSVMOptimizer):
+    """Simple optimizer, which explicitly constructs matrix of all pairs of samples."""
 
     def __init__(self, x, y, alpha, rank_ratio, timeit=False):
         super().__init__(alpha, rank_ratio, timeit)
@@ -312,9 +325,8 @@ class SimpleOptimizer(RankSVMOptimizer):
         return s + np.dot(safe_sparse_dot(z.T, self.Asv), self.data_x).T
 
 
-class PRSVMOptimizer(RankSVMOptimizer):
-    """PRSVM optimizer that after each iteration of Newton's method
-    constructs matrix of support vector pairs"""
+class _PRSVMOptimizer(_RankSVMOptimizer):
+    """PRSVM optimizer that after each iteration of Newton's method constructs matrix of support vector pairs."""
 
     def __init__(self, x, y, alpha, rank_ratio, timeit=False):
         super().__init__(alpha, rank_ratio, timeit)
@@ -353,8 +365,9 @@ class PRSVMOptimizer(RankSVMOptimizer):
         return s + z
 
 
-class LargeScaleOptimizer(RankSVMOptimizer):
-    """Optimizer that does not explicitly create matrix of constraints
+class _LargeScaleOptimizer(_RankSVMOptimizer):
+    """
+    Optimizer that does not explicitly create matrix of constraints.
 
     Parameters
     ----------
@@ -368,8 +381,8 @@ class LargeScaleOptimizer(RankSVMOptimizer):
         Whether to fit an intercept. Only used if regression objective
         is optimized (rank_ratio < 1.0).
 
-    counter : object
-        Instance of :class:`Counter` subclass.
+    counter : :class:`OrderStatisticTreeSurvivalCounter` or :class:`SurvivalCounter`
+        An instance of a :class:`Counter` subclass used for counting comparable pairs.
 
     References
     ----------
@@ -407,7 +420,7 @@ class LargeScaleOptimizer(RankSVMOptimizer):
         return w
 
     def _split_coefficents(self, w):
-        """Split into intercept/bias and feature-specific coefficients"""
+        """Split into intercept/bias and feature-specific coefficients."""
         if self._fit_intercept:
             bias = w[0]
             wf = w[1:]
@@ -454,7 +467,7 @@ class LargeScaleOptimizer(RankSVMOptimizer):
         l_plus, xv_plus, l_minus, xv_minus = self._counter.calculate(wf)  # pylint: disable=unused-variable
         x = self._counter.x
 
-        xw = self._xw  # noqa: F841; # pylint: disable=unused-variable
+        xw = self._xw  # pylint: disable=unused-variable; # noqa: F841
         z = numexpr.evaluate("(l_plus + l_minus) * xw - xv_plus - xv_minus - l_minus + l_plus")
 
         grad = wf + self._rank_penalty * np.dot(x.T, z)
@@ -494,8 +507,9 @@ class LargeScaleOptimizer(RankSVMOptimizer):
         return hessp
 
 
-class NonlinearLargeScaleOptimizer(RankSVMOptimizer):
-    """Optimizer that does not explicitly create matrix of constraints
+class _NonlinearLargeScaleOptimizer(_RankSVMOptimizer):
+    """
+    Optimizer that does not explicitly create matrix of constraints.
 
     Parameters
     ----------
@@ -505,8 +519,8 @@ class NonlinearLargeScaleOptimizer(RankSVMOptimizer):
     rank_ratio : float
         Trade-off between regression and ranking objectives.
 
-    counter : object
-        Instance of :class:`Counter` subclass.
+    counter : :class:`OrderStatisticTreeSurvivalCounter` or :class:`SurvivalCounter`
+        An instance of a :class:`Counter` subclass used for counting comparable pairs.
 
     References
     ----------
@@ -545,7 +559,7 @@ class NonlinearLargeScaleOptimizer(RankSVMOptimizer):
         return w
 
     def _split_coefficents(self, w):
-        """Split into intercept/bias and feature-specific coefficients"""
+        """Split into intercept/bias and feature-specific coefficients."""
         if self._fit_intercept:
             bias = w[0]
             wf = w[1:]
@@ -638,7 +652,7 @@ class NonlinearLargeScaleOptimizer(RankSVMOptimizer):
         return hessian
 
 
-class BaseSurvivalSVM(BaseEstimator, metaclass=ABCMeta):
+class _BaseSurvivalSVM(BaseEstimator, metaclass=ABCMeta):
     _parameter_constraints = {
         "alpha": [Interval(Real, 0.0, None, closed="neither")],
         "rank_ratio": [Interval(Real, 0.0, 1.0, closed="both")],
@@ -676,39 +690,39 @@ class BaseSurvivalSVM(BaseEstimator, metaclass=ABCMeta):
         self.coef_ = None
         self.optimizer_result_ = None
 
-    def _create_optimizer(self, X, y, status):
-        """Samples are ordered by relevance"""
+    def _create_optimizer(self, X, y, status):  # numpydoc ignore=SS05
+        """Samples are ordered by relevance."""
         if self.optimizer is None:
             self.optimizer = "avltree"
 
         times, ranks = y
 
         if self.optimizer == "simple":
-            optimizer = SimpleOptimizer(X, status, self.alpha, self.rank_ratio, timeit=self.timeit)
+            optimizer = _SimpleOptimizer(X, status, self.alpha, self.rank_ratio, timeit=self.timeit)
         elif self.optimizer == "PRSVM":
-            optimizer = PRSVMOptimizer(X, status, self.alpha, self.rank_ratio, timeit=self.timeit)
+            optimizer = _PRSVMOptimizer(X, status, self.alpha, self.rank_ratio, timeit=self.timeit)
         elif self.optimizer == "direct-count":
-            optimizer = LargeScaleOptimizer(
+            optimizer = _LargeScaleOptimizer(
                 self.alpha,
                 self.rank_ratio,
                 self.fit_intercept,
-                SurvivalCounter(X, ranks, status, len(ranks), times),
+                _SurvivalCounter(X, ranks, status, len(ranks), times),
                 timeit=self.timeit,
             )
         elif self.optimizer == "rbtree":
-            optimizer = LargeScaleOptimizer(
+            optimizer = _LargeScaleOptimizer(
                 self.alpha,
                 self.rank_ratio,
                 self.fit_intercept,
-                OrderStatisticTreeSurvivalCounter(X, ranks, status, RBTree, times),
+                _OrderStatisticTreeSurvivalCounter(X, ranks, status, RBTree, times),
                 timeit=self.timeit,
             )
         elif self.optimizer == "avltree":
-            optimizer = LargeScaleOptimizer(
+            optimizer = _LargeScaleOptimizer(
                 self.alpha,
                 self.rank_ratio,
                 self.fit_intercept,
-                OrderStatisticTreeSurvivalCounter(X, ranks, status, AVLTree, times),
+                _OrderStatisticTreeSurvivalCounter(X, ranks, status, AVLTree, times),
                 timeit=self.timeit,
             )
 
@@ -720,17 +734,102 @@ class BaseSurvivalSVM(BaseEstimator, metaclass=ABCMeta):
 
     @abstractmethod
     def _fit(self, X, time, event, samples_order):
-        """Create and run optimizer"""
+        """Create and run optimizer."""
 
     @abstractmethod
+    def _compute_scores(self, X):
+        """
+        Compute raw scores for input samples.
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            The input samples.
+
+        Returns
+        -------
+        ndarray, shape = (n_samples,), dtype=float
+            Raw scores before intercept adjustment and rank_ratio transformation.
+        """
+
+    def _validate_predict_input(self, X):
+        """
+        Validate input for prediction and check if estimator is fitted.
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            The input samples.
+
+        Returns
+        -------
+        X_validated : ndarray, shape = (n_samples, n_features)
+            Validated input samples.
+        """
+        check_is_fitted(self, "coef_")
+        return validate_data(self, ensure_eager_dataframe(X), reset=False)
+
+    def _post_process_scores(self, val):
+        """
+        Apply intercept adjustment and rank_ratio-based transformation to raw scores.
+
+        Parameters
+        ----------
+        val : ndarray, shape = (n_samples,), dtype=float
+            Raw scores from _compute_scores.
+
+        Returns
+        -------
+        ndarray, shape = (n_samples,), dtype=float
+            Post-processed scores (risk scores or transformed survival times).
+        """
+        if hasattr(self, "intercept_"):
+            val += self.intercept_
+
+        # Order by increasing survival time if objective is pure ranking
+        if self.rank_ratio == 1:
+            val *= -1
+        else:
+            # model was fitted on log(time), transform to original scale
+            val = np.exp(val)
+
+        return val
+
     def predict(self, X):
-        """Predict risk score"""
+        """
+        Predict risk scores or transformed survival times.
+
+        If the model has been fit only considering the ranking objective
+        (``rank_ratio = 1``), predictions are risk scores (i.e. higher values
+        indicate an increased risk of experiencing an event). The scores
+        have no unit and are only meaningful to rank samples by their risk
+        of experiencing an event.
+
+        If the regression objective has been used (``rank_ratio < 1``),
+        predictions are transformed survival times.
+        Lower scores indicate shorter survival, higher scores longer survival.
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            The input samples.
+
+        Returns
+        -------
+        ndarray, shape = (n_samples,), dtype=float
+            Risk scores (if ``rank_ratio = 1``), or transformed survival times
+            (if ``rank_ratio < 1``).
+        """
+        X = self._validate_predict_input(X)
+        val = self._compute_scores(X)
+        return self._post_process_scores(val)
 
     def _validate_for_fit(self, X):
-        return self._validate_data(X, ensure_min_samples=2)
+        return validate_data(self, ensure_eager_dataframe(X), ensure_min_samples=2)
 
     def fit(self, X, y):
-        """Build a survival support vector machine model from training data.
+        """
+        Build a survival support vector machine model from training data.
 
         Parameters
         ----------
@@ -738,13 +837,14 @@ class BaseSurvivalSVM(BaseEstimator, metaclass=ABCMeta):
             Data matrix.
 
         y : structured array, shape = (n_samples,)
-            A structured array containing the binary event indicator
-            as first field, and time of event or time of censoring as
-            second field.
+            A structured array with two fields. The first field is a boolean
+            where ``True`` indicates an event and ``False`` indicates right-censoring.
+            The second field is a float with the time of event or time of censoring.
 
         Returns
         -------
-        self
+        object
+            Fitted estimator.
         """
         X = self._validate_for_fit(X)
         event, time = check_array_survival(X, y, allow_time_zero=False)
@@ -763,7 +863,7 @@ class BaseSurvivalSVM(BaseEstimator, metaclass=ABCMeta):
             assert np.isfinite(time).all()
 
         random_state = check_random_state(self.random_state)
-        samples_order = BaseSurvivalSVM._argsort_and_resolve_ties(time, random_state)
+        samples_order = _BaseSurvivalSVM._argsort_and_resolve_ties(time, random_state)
 
         opt_result = self._fit(X, time, event, samples_order)
         coef = opt_result.x
@@ -787,7 +887,7 @@ class BaseSurvivalSVM(BaseEstimator, metaclass=ABCMeta):
 
     @staticmethod
     def _argsort_and_resolve_ties(time, random_state):
-        """Like np.argsort, but resolves ties uniformly at random"""
+        """Like np.argsort, but resolves ties uniformly at random."""
         n_samples = len(time)
         order = np.argsort(time, kind="mergesort")
 
@@ -804,81 +904,85 @@ class BaseSurvivalSVM(BaseEstimator, metaclass=ABCMeta):
         return order
 
 
-class FastSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
-    """Efficient Training of linear Survival Support Vector Machine
+class FastSurvivalSVM(_BaseSurvivalSVM, SurvivalAnalysisMixin):
+    r"""
+    Implements an efficient linear Support Vector Machine for survival analysis.
 
-    Training data consists of *n* triplets :math:`(\\mathbf{x}_i, y_i, \\delta_i)`,
-    where :math:`\\mathbf{x}_i` is a *d*-dimensional feature vector, :math:`y_i > 0`
-    the survival time or time of censoring, and :math:`\\delta_i \\in \\{0,1\\}`
+    Capable of optimizing both ranking and regression objectives.
+
+    Training data consists of *n* triplets :math:`(\mathbf{x}_i, y_i, \delta_i)`,
+    where :math:`\mathbf{x}_i` is a *d*-dimensional feature vector, :math:`y_i > 0`
+    the survival time or time of censoring, and :math:`\delta_i \in \{0,1\}`
     the binary event indicator. Using the training data, the objective is to
     minimize the following function:
 
     .. math::
 
-         \\arg \\min_{\\mathbf{w}, b} \\frac{1}{2} \\mathbf{w}^\\top \\mathbf{w}
-         + \\frac{\\alpha}{2} \\left[ r \\sum_{i,j \\in \\mathcal{P}}
-         \\max(0, 1 - (\\mathbf{w}^\\top \\mathbf{x}_i - \\mathbf{w}^\\top \\mathbf{x}_j))^2
-         + (1 - r) \\sum_{i=0}^n \\left( \\zeta_{\\mathbf{w}, b} (y_i, x_i, \\delta_i)
-         \\right)^2 \\right]
+         \arg \min_{\mathbf{w}, b} \frac{1}{2} \mathbf{w}^\top \mathbf{w}
+         + \frac{\alpha}{2} \left[ r \sum_{i,j \in \mathcal{P}}
+         \max(0, 1 - (\mathbf{w}^\top \mathbf{x}_i - \mathbf{w}^\top \mathbf{x}_j))^2
+         + (1 - r) \sum_{i=0}^n \left( \zeta_{\mathbf{w}, b} (y_i, x_i, \delta_i)
+         \right)^2 \right]
 
-        \\zeta_{\\mathbf{w},b} (y_i, \\mathbf{x}_i, \\delta_i) =
-        \\begin{cases}
-        \\max(0, y_i - \\mathbf{w}^\\top \\mathbf{x}_i - b) \\quad \\text{if $\\delta_i = 0$,} \\\\
-        y_i - \\mathbf{w}^\\top \\mathbf{x}_i - b \\quad \\text{if $\\delta_i = 1$,} \\\\
-        \\end{cases}
+        \zeta_{\mathbf{w},b} (y_i, \mathbf{x}_i, \delta_i) =
+        \begin{cases}
+        \max(0, y_i - \mathbf{w}^\top \mathbf{x}_i - b) \quad \text{if $\delta_i = 0$,} \\
+        y_i - \mathbf{w}^\top \mathbf{x}_i - b \quad \text{if $\delta_i = 1$,} \\
+        \end{cases}
 
-        \\mathcal{P} = \\{ (i, j) \\mid y_i > y_j \\land \\delta_j = 1 \\}_{i,j=1,\\dots,n}
+        \mathcal{P} = \{ (i, j) \mid y_i > y_j \land \delta_j = 1 \}_{i,j=1,\dots,n}
 
-    The hyper-parameter :math:`\\alpha > 0` determines the amount of regularization
+    The hyper-parameter :math:`\alpha > 0` determines the amount of regularization
     to apply: a smaller value increases the amount of regularization and a
     higher value reduces the amount of regularization. The hyper-parameter
-    :math:`r \\in [0; 1]` determines the trade-off between the ranking objective
+    :math:`r \in [0; 1]` determines the trade-off between the ranking objective
     and the regression objective. If :math:`r = 1` it reduces to the ranking
     objective, and if :math:`r = 0` to the regression objective. If the regression
-    objective is used, survival/censoring times are log-transform and thus cannot be
+    objective is used, survival/censoring times are log-transformed and thus cannot be
     zero or negative.
 
     See the :ref:`User Guide </user_guide/survival-svm.ipynb>` and [1]_ for further description.
 
     Parameters
     ----------
-    alpha : float, positive, default: 1
-        Weight of penalizing the squared hinge loss in the objective function
+    alpha : float, default: 1
+        Weight of penalizing the squared hinge loss in the objective function. Must be greater than 0.
 
     rank_ratio : float, optional, default: 1.0
-        Mixing parameter between regression and ranking objective with ``0 <= rank_ratio <= 1``.
-        If ``rank_ratio = 1``, only ranking is performed, if ``rank_ratio = 0``, only regression
-        is performed. A non-zero value is only allowed if optimizer is one of 'avltree', 'rbtree',
-        or 'direct-count'.
+        Mixing parameter between regression and ranking objectives, with ``0 <= rank_ratio <= 1``.
+        If ``rank_ratio = 1``, only ranking is performed. If ``rank_ratio = 0``, only regression
+        is performed. A ``rank_ratio`` less than 1.0 (i.e., including a regression objective) is
+        only supported if the ``optimizer`` is 'avltree', 'rbtree', or 'direct-count'.
 
-    fit_intercept : boolean, optional, default: False
+    fit_intercept : bool, optional, default: False
         Whether to calculate an intercept for the regression model. If set to ``False``, no intercept
-        will be calculated. Has no effect if ``rank_ratio = 1``, i.e., only ranking is performed.
+        will be calculated. This parameter has no effect if ``rank_ratio = 1``, i.e., only ranking is performed.
 
     max_iter : int, optional, default: 20
-        Maximum number of iterations to perform in Newton optimization
+        Maximum number of iterations to perform in Newton optimization.
 
     verbose : bool, optional, default: False
-        Whether to print messages during optimization
+        If ``True``, print messages during optimization.
 
     tol : float or None, optional, default: None
-        Tolerance for termination. For detailed control, use solver-specific
-        options.
+        Tolerance for termination. If ``None``, the solver's default tolerance is used.
+        See :func:`scipy.optimize.minimize`.
 
     optimizer : {'avltree', 'direct-count', 'PRSVM', 'rbtree', 'simple'}, optional, default: 'avltree'
-        Which optimizer to use.
+        Specifies which optimizer to use.
 
-    random_state : int or :class:`numpy.random.RandomState` instance, optional
-        Random number generator (used to resolve ties in survival times).
+    random_state : int, :class:`numpy.random.RandomState` instance, or None, optional, default: None
+        Used to resolve ties in survival times. Pass an int for reproducible output across
+        multiple :meth:`fit` calls.
 
-    timeit : False, int or None, default: None
-        If non-zero value is provided the time it takes for optimization is measured.
-        The given number of repetitions are performed. Results can be accessed from the
-        ``optimizer_result_`` attribute.
+    timeit : bool, int, or None, optional, default: False
+        If ``True`` or a non-zero integer, the time taken for optimization is measured.
+        If an integer is provided, the optimization is repeated that many times.
+        Results can be accessed from the ``optimizer_result_`` attribute.
 
     Attributes
     ----------
-    coef_ : ndarray, shape = (n_features,)
+    coef_ : ndarray, shape = (n_features,), dtype = float
         Coefficients of the features in the decision function.
 
     optimizer_result_ : :class:`scipy.optimize.OptimizeResult`
@@ -887,14 +991,14 @@ class FastSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
     n_features_in_ : int
         Number of features seen during ``fit``.
 
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+    feature_names_in_ : ndarray, shape = (`n_features_in_`,), dtype = object
         Names of features seen during ``fit``. Defined only when `X`
         has feature names that are all strings.
 
     n_iter_ : int
         Number of iterations run by the optimization routine to fit the model.
 
-    See also
+    See Also
     --------
     FastKernelSurvivalSVM
         Fast implementation for arbitrary kernel functions.
@@ -909,7 +1013,7 @@ class FastSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
     """
 
     _parameter_constraints = {
-        **BaseSurvivalSVM._parameter_constraints,
+        **_BaseSurvivalSVM._parameter_constraints,
         "optimizer": [StrOptions({"simple", "PRSVM", "direct-count", "rbtree", "avltree"}), None],
     }
 
@@ -946,59 +1050,34 @@ class FastSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
         opt_result = optimizer.run(tol=self.tol, options={"maxiter": self.max_iter, "disp": self.verbose})
         return opt_result
 
-    def predict(self, X):
-        """Rank samples according to survival times
-
-        Lower ranks indicate shorter survival, higher ranks longer survival.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_features)
-            The input samples.
-
-        Returns
-        -------
-        y : ndarray, shape = (n_samples,)
-            Predicted ranks.
-        """
-        check_is_fitted(self, "coef_")
-        X = self._validate_data(X, reset=False)
-
-        val = np.dot(X, self.coef_)
-        if hasattr(self, "intercept_"):
-            val += self.intercept_
-
-        # Order by increasing survival time if objective is pure ranking
-        if self.rank_ratio == 1:
-            val *= -1
-        else:
-            # model was fitted on log(time), transform to original scale
-            val = np.exp(val)
-
-        return val
+    def _compute_scores(self, X):
+        return np.dot(X, self.coef_)
 
 
-class FastKernelSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
-    """Efficient Training of kernel Survival Support Vector Machine.
+class FastKernelSurvivalSVM(_BaseSurvivalSVM, SurvivalAnalysisMixin):
+    """
+    Implements an efficient kernel Support Vector Machine for survival analysis.
+
+    The model extends :class:`FastSurvivalSVM` to non-linear relationships through kernel functions.
 
     See the :ref:`User Guide </user_guide/survival-svm.ipynb>` and [1]_ for further description.
 
     Parameters
     ----------
-    alpha : float, positive, default: 1
-        Weight of penalizing the squared hinge loss in the objective function
+    alpha : float, default: 1
+        Weight of penalizing the squared hinge loss in the objective function. Must be greater than 0.
 
     rank_ratio : float, optional, default: 1.0
-        Mixing parameter between regression and ranking objective with ``0 <= rank_ratio <= 1``.
-        If ``rank_ratio = 1``, only ranking is performed, if ``rank_ratio = 0``, only regression
-        is performed. A non-zero value is only allowed if optimizer is one of 'avltree', 'PRSVM',
-        or 'rbtree'.
+        Mixing parameter between regression and ranking objectives, with ``0 <= rank_ratio <= 1``.
+        If ``rank_ratio = 1``, only ranking is performed. If ``rank_ratio = 0``, only regression
+        is performed. A ``rank_ratio`` less than 1.0 (i.e., including a regression objective) is
+        only supported if the ``optimizer`` is 'avltree', 'PRSVM', or 'rbtree'.
 
-    fit_intercept : boolean, optional, default: False
+    fit_intercept : bool, optional, default: False
         Whether to calculate an intercept for the regression model. If set to ``False``, no intercept
-        will be calculated. Has no effect if ``rank_ratio = 1``, i.e., only ranking is performed.
+        will be calculated. This parameter has no effect if ``rank_ratio = 1``, i.e., only ranking is performed.
 
-    kernel : str or callable, default: 'linear'.
+    kernel : str or callable, default: 'rbf'
         Kernel mapping used internally. This parameter is directly passed to
         :func:`sklearn.metrics.pairwise.pairwise_kernels`.
         If `kernel` is a string, it must be one of the metrics
@@ -1018,46 +1097,47 @@ class FastKernelSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
         the kernel; see the documentation for :mod:`sklearn.metrics.pairwise`.
         Ignored by other kernels.
 
-    degree : int, default: 3
+    degree : int, optional, default: 3
         Degree of the polynomial kernel. Ignored by other kernels.
 
-    coef0 : float, optional
+    coef0 : float, optional, default: 1
         Zero coefficient for polynomial and sigmoid kernels.
         Ignored by other kernels.
 
-    kernel_params : mapping of string to any, optional
+    kernel_params : dict or None, optional, default: None
         Additional parameters (keyword arguments) for kernel function passed
         as callable object.
 
     max_iter : int, optional, default: 20
-        Maximum number of iterations to perform in Newton optimization
+        Maximum number of iterations to perform in Newton optimization.
 
     verbose : bool, optional, default: False
-        Whether to print messages during optimization
+        If ``True``, print messages during optimization.
 
     tol : float or None, optional, default: None
-        Tolerance for termination. For detailed control, use solver-specific
-        options.
+        Tolerance for termination. If ``None``, the solver's default tolerance is used.
+        See :func:`scipy.optimize.minimize`.
 
     optimizer : {'avltree', 'rbtree'}, optional, default: 'rbtree'
-        Which optimizer to use.
+        Specifies which optimizer to use..
 
-    random_state : int or :class:`numpy.random.RandomState` instance, optional
-        Random number generator (used to resolve ties in survival times).
+    random_state : int, :class:`numpy.random.RandomState` instance, or None, optional, default: None
+        Used to resolve ties in survival times. Pass an int for reproducible output across
+        multiple :meth:`fit` calls.
 
-    timeit : False, int or None, default: None
-        If non-zero value is provided the time it takes for optimization is measured.
-        The given number of repetitions are performed. Results can be accessed from the
-        ``optimizer_result_`` attribute.
+    timeit : bool, int, or None, optional, default: False
+        If ``True`` or a non-zero integer, the time taken for optimization is measured.
+        If an integer is provided, the optimization is repeated that many times.
+        Results can be accessed from the ``optimizer_result_`` attribute.
 
     Attributes
     ----------
-    coef_ : ndarray, shape = (n_samples,)
+    coef_ : ndarray, shape = (n_samples,), dtype = float
         Weights assigned to the samples in training data to represent
         the decision function in kernel space.
 
-    fit_X_ : ndarray
-        Training data.
+    fit_X_ : ndarray, shape = (n_samples, `n_features_in_`), dtype = float
+        Training data used for fitting. Used to compute the kernel matrix for prediction.
 
     optimizer_result_ : :class:`scipy.optimize.OptimizeResult`
         Stats returned by the optimizer. See :class:`scipy.optimize.OptimizeResult`.
@@ -1065,14 +1145,14 @@ class FastKernelSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
     n_features_in_ : int
         Number of features seen during ``fit``.
 
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+    feature_names_in_ : ndarray, shape = (`n_features_in_`,), dtype = object
         Names of features seen during ``fit``. Defined only when `X`
         has feature names that are all strings.
 
     n_iter_ : int
         Number of iterations run by the optimization routine to fit the model.
 
-    See also
+    See Also
     --------
     FastSurvivalSVM
         Fast implementation for linear kernel.
@@ -1133,9 +1213,11 @@ class FastKernelSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
         self.coef0 = coef0
         self.kernel_params = kernel_params
 
-    def _more_tags(self):
+    def __sklearn_tags__(self):
         # tell sklearn.utils.metaestimators._safe_split function that we expect kernel matrix
-        return {"pairwise": self.kernel == "precomputed"}
+        tags = super().__sklearn_tags__()
+        tags.input_tags.pairwise = self.kernel == "precomputed"
+        return tags
 
     def _get_kernel(self, X, Y=None):
         if callable(self.kernel):
@@ -1151,19 +1233,19 @@ class FastKernelSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
         times, ranks = y
 
         if self.optimizer == "rbtree":
-            optimizer = NonlinearLargeScaleOptimizer(
+            optimizer = _NonlinearLargeScaleOptimizer(
                 self.alpha,
                 self.rank_ratio,
                 self.fit_intercept,
-                OrderStatisticTreeSurvivalCounter(kernel_mat, ranks, status, RBTree, times),
+                _OrderStatisticTreeSurvivalCounter(kernel_mat, ranks, status, RBTree, times),
                 timeit=self.timeit,
             )
         elif self.optimizer == "avltree":
-            optimizer = NonlinearLargeScaleOptimizer(
+            optimizer = _NonlinearLargeScaleOptimizer(
                 self.alpha,
                 self.rank_ratio,
                 self.fit_intercept,
-                OrderStatisticTreeSurvivalCounter(kernel_mat, ranks, status, AVLTree, times),
+                _OrderStatisticTreeSurvivalCounter(kernel_mat, ranks, status, AVLTree, times),
                 timeit=self.timeit,
             )
 
@@ -1173,6 +1255,10 @@ class FastKernelSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
         if self.kernel != "precomputed":
             return super()._validate_for_fit(X)
         return X
+
+    def _validate_predict_input(self, X):
+        check_is_fitted(self, ["coef_", "fit_X_"])
+        return validate_data(self, ensure_eager_dataframe(X), reset=False)
 
     def _fit(self, X, time, event, samples_order):
         # don't reorder X here, because it might be a precomputed kernel matrix
@@ -1196,33 +1282,6 @@ class FastKernelSurvivalSVM(BaseSurvivalSVM, SurvivalAnalysisMixin):
 
         return opt_result
 
-    def predict(self, X):
-        """Rank samples according to survival times
-
-        Lower ranks indicate shorter survival, higher ranks longer survival.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_features)
-            The input samples.
-
-        Returns
-        -------
-        y : ndarray, shape = (n_samples,)
-            Predicted ranks.
-        """
-        X = self._validate_data(X, reset=False)
+    def _compute_scores(self, X):
         kernel_mat = self._get_kernel(X, self.fit_X_)
-
-        val = np.dot(kernel_mat, self.coef_)
-        if hasattr(self, "intercept_"):
-            val += self.intercept_
-
-        # Order by increasing survival time if objective is pure ranking
-        if self.rank_ratio == 1:
-            val *= -1
-        else:
-            # model was fitted on log(time), transform to original scale
-            val = np.exp(val)
-
-        return val
+        return np.dot(kernel_mat, self.coef_)

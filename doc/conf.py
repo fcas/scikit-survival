@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 #
 # scikit-survival documentation build configuration file
 #
@@ -57,6 +56,7 @@ extensions = [
     "nbsphinx",
     "sphinx_design",
     "sphinx_copybutton",
+    "matplotlib.sphinxext.plot_directive",
 ]
 
 spelling_word_list_filename = "spelling_wordlist.txt"
@@ -146,9 +146,9 @@ exclude_patterns = ["_build", "**/README.*", "Thumbs.db", ".DS_Store"]
 nbsphinx_execute = "never"
 
 nbsphinx_prolog = r"""
-{% set docname = "doc/" + env.doc2path(env.docname, base=None) %}
+{% set docname = "doc/" + env.doc2path(env.docname, base=None)|string %}
 {% set notebook = env.doc2path(env.docname, base=None)|replace("user_guide/", "notebooks/") %}
-{% set branch = 'master' if 'dev' in env.config.release else 'v{}'.format(env.config.release) %}
+{% set branch = 'main' if 'dev' in env.config.release else 'v{}'.format(env.config.release) %}
 
 .. raw:: html
 
@@ -205,7 +205,7 @@ html_title = f"scikit-survival {version}"
 # html_favicon = None
 
 html_css_files = ["custom.css"]
-html_js_files = ["buttons.js"]
+html_js_files = ["github-stats.js"]
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -217,10 +217,12 @@ extlinks = {
 }
 
 intersphinx_mapping = {
-    "sklearn": ("https://scikit-learn.org/1.4", None),
+    "sklearn": ("https://scikit-learn.org/1.9", None),
     "cython": ("https://cython.readthedocs.io/en/latest/", None),
+    "numpy": ("https://numpy.org/doc/stable/", None),
     "scipy": ("https://docs.scipy.org/doc/scipy/", None),
     "pandas": ("https://pandas.pydata.org/docs/", None),
+    "polars": ("https://docs.pola.rs/api/python/stable/", None),
 }
 
 
@@ -282,9 +284,9 @@ def linkcode_resolve(domain, info):
         if m:
             branch = m.group(1)
         elif "dev" in release:
-            branch = "master"
+            branch = "main"
         else:
-            branch = "v{}".format(release)
+            branch = f"v{release}"
         return "https://github.com/sebp/scikit-survival/blob/{branch}/{filename}{linespec}".format(
             branch=branch, filename=fn, linespec=linespec
         )
@@ -312,7 +314,7 @@ class RTDUrlPreprocessor(Preprocessor):
 
                 rel_url = "/".join(path)
                 filename = match.group(2)
-                replace.append((match.group(0), "({}/{}.rst)".format(rel_url, filename)))
+                replace.append((match.group(0), f"({rel_url}/{filename}.rst)"))
 
             for s, r in replace:
                 text = text.replace(s, r)
@@ -336,7 +338,7 @@ nbsphinx_from_notebook_node = nbsphinx.Exporter.from_notebook_node
 nbsphinx.Exporter.from_notebook_node = _from_notebook_node
 
 
-def patch_sklearn():
+def patch_sklearn_gb_doc():
     from sklearn.ensemble._gb import BaseGradientBoosting
     from sklearn.utils.metaestimators import _BaseComposition
 
@@ -347,4 +349,10 @@ def patch_sklearn():
     _BaseComposition.steps = []
 
 
-patch_sklearn()
+patch_sklearn_gb_doc()
+
+# configure matplotlib plot directive
+# https://matplotlib.org/stable/api/sphinxext_plot_directive_api.html#configuration-options
+plot_include_source = True
+plot_html_show_formats = False
+plot_html_show_source_link = False

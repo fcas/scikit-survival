@@ -1,6 +1,6 @@
 |License| |Docs| |DOI|
 
-|build-tests| |build-windows| |Codecov| |Codacy|
+|build-tests| |Codecov| |Codacy|
 
 ***************
 scikit-survival
@@ -32,15 +32,17 @@ this unique characteristic of such a dataset into account.
 Requirements
 ============
 
-- Python 3.9 or later
+- Python 3.11 or later
+- clarabel
 - ecos
 - joblib
 - numexpr
-- numpy
+- numpy 2.0.0 or later
 - osqp
-- pandas 1.0.5 or later
-- scikit-learn 1.4
+- pandas 2.2.0 or later
+- scikit-learn 1.9
 - scipy
+- narwhals 2.0.1 or later
 - C/C++ compiler
 
 ============
@@ -48,12 +50,12 @@ Installation
 ============
 
 The easiest way to install scikit-survival is to use
-`Anaconda <https://www.anaconda.com/distribution/>`_ by running::
+`conda-forge <https://conda-forge.org/docs/user/introduction/>`_ by running::
 
-  conda install -c sebp scikit-survival
+  conda install -c conda-forge scikit-survival
 
-Alternatively, you can install scikit-survival from source
-following `this guide <https://scikit-survival.readthedocs.io/en/stable/install.html#from-source>`_.
+Alternatively, you can install scikit-survival `from PyPI <https://scikit-survival.readthedocs.io/en/stable/install.html#pip>`_
+or `from source <https://scikit-survival.readthedocs.io/en/stable/install.html#from-source>`_.
 
 ========
 Examples
@@ -70,7 +72,7 @@ Help and Support
 **Documentation**
 
 - HTML documentation for the latest release: https://scikit-survival.readthedocs.io/en/stable/
-- HTML documentation for the development version (master branch): https://scikit-survival.readthedocs.io/en/latest/
+- HTML documentation for the development version (main branch): https://scikit-survival.readthedocs.io/en/latest/
 - For a list of notable changes, see the `release notes <https://scikit-survival.readthedocs.io/en/stable/release_notes.html>`_.
 
 **Bug reports**
@@ -118,7 +120,7 @@ Please cite the following paper if you are using **scikit-survival**.
   :target: COPYING
   :alt: License
 
-.. |Codecov| image:: https://codecov.io/gh/sebp/scikit-survival/branch/master/graph/badge.svg
+.. |Codecov| image:: https://codecov.io/gh/sebp/scikit-survival/branch/main/graph/badge.svg
   :target: https://codecov.io/gh/sebp/scikit-survival
   :alt: codecov
 
@@ -134,12 +136,8 @@ Please cite the following paper if you are using **scikit-survival**.
    :target: https://zenodo.org/badge/latestdoi/77409504
    :alt: Digital Object Identifier (DOI)
 
-.. |build-tests| image:: https://github.com/sebp/scikit-survival/actions/workflows/tests-workflow.yaml/badge.svg?branch=master
-  :target: https://github.com/sebp/scikit-survival/actions?query=workflow%3Atests+branch%3Amaster
+.. |build-tests| image:: https://github.com/sebp/scikit-survival/actions/workflows/tests-workflow.yaml/badge.svg?branch=main
+  :target: https://github.com/sebp/scikit-survival/actions?query=workflow%3Atests+branch%3Amain
   :alt: GitHub Actions Tests Status
-
-.. |build-windows| image:: https://ci.appveyor.com/api/projects/status/github/sebp/scikit-survival?branch=master&svg=true
-   :target: https://ci.appveyor.com/project/sebp/scikit-survival
-   :alt: Windows Build Status on AppVeyor
 
 .. _survival analysis: https://en.wikipedia.org/wiki/Survival_analysis

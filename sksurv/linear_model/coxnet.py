@@ -10,6 +10,10 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+"""
+Implementation of Cox's proportional hazards model with elastic-net regularization.
+"""
+
 import numbers
 import warnings
 
@@ -18,8 +22,15 @@ from sklearn.base import BaseEstimator
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.preprocessing import normalize as f_normalize
 from sklearn.utils._param_validation import Interval, StrOptions
-from sklearn.utils.validation import assert_all_finite, check_is_fitted, check_non_negative, column_or_1d
+from sklearn.utils.validation import (
+    assert_all_finite,
+    check_is_fitted,
+    check_non_negative,
+    column_or_1d,
+    validate_data,
+)
 
+from .._dataframe import ensure_eager_dataframe
 from ..base import SurvivalAnalysisMixin
 from ..util import check_array_survival
 from ._coxnet import call_fit_coxnet
@@ -29,7 +40,8 @@ __all__ = ["CoxnetSurvivalAnalysis"]
 
 
 class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
-    """Cox's proportional hazard's model with elastic net penalty.
+    r"""
+    Cox's proportional hazard's model with elastic net penalty.
 
     See the :ref:`User Guide </user_guide/coxnet.ipynb>` and [1]_ for further description.
 
@@ -40,19 +52,29 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
 
     alphas : array-like or None, optional
         List of alphas where to compute the models.
-        If ``None`` alphas are set automatically.
+        If ``None``, alphas are set automatically.
+
+        In this case, the ``alphas`` sequence is determined by :math:`\alpha_\max`
+        and ``alpha_min_ratio``. The latter determines the smallest alpha value
+        :math:`\alpha_\min` in the generated alphas sequence such that
+        ``alpha_min_ratio`` equals the ratio :math:`\frac{\alpha_\min}{\alpha_\max}`.
+        The generated ``alphas`` sequence contains ``n_alphas`` values linear
+        on the log scale from :math:`\alpha_\max` down to :math:`\alpha_\min`.
+        :math:`\alpha_\max` is not user-specified but is computed from the
+        input data.
 
     alpha_min_ratio : float or { "auto" }, optional, default: "auto"
-        Determines minimum alpha of the regularization path
+        Determines the minimum alpha of the regularization path
         if ``alphas`` is ``None``. The smallest value for alpha
-        is computed as the fraction of the data derived maximum
+        is computed as the fraction of the maximum
         alpha (i.e. the smallest value for which all
-        coefficients are zero).
+        coefficients are zero), which is derived from the input data.
 
         If set to "auto", the value will depend on the
-        sample size relative to the number of features.
-        If ``n_samples > n_features``, the default value is 0.0001
-        If ``n_samples <= n_features``, 0.01 is the default value.
+        sample size relative to the number of features:
+
+        - If ``n_samples > n_features``, the default value is 0.0001.
+        - If ``n_samples <= n_features``, the default value is 0.01.
 
     l1_ratio : float, optional, default: 0.5
         The ElasticNet mixing parameter, with ``0 < l1_ratio <= 1``.
@@ -70,14 +92,14 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
         Note: the penalty factors are internally rescaled to sum to
         `n_features`, and the alphas sequence will reflect this change.
 
-    normalize : boolean, optional, default: False
+    normalize : bool, optional, default: False
         If True, the features X will be normalized before optimization by
         subtracting the mean and dividing by the l2-norm.
         If you wish to standardize, please use
         :class:`sklearn.preprocessing.StandardScaler` before calling ``fit``
         on an estimator with ``normalize=False``.
 
-    copy_X : boolean, optional, default: True
+    copy_X : bool, optional, default: True
         If ``True``, X will be copied; else, it may be overwritten.
 
     tol : float, optional, default: 1e-7
@@ -85,7 +107,7 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
         until all updates are smaller than ``tol``.
 
     max_iter : int, optional, default: 100000
-        The maximum number of iterations.
+        The maximum number of iterations taken for the solver to converge.
 
     verbose : bool, optional, default: False
         Whether to print additional information during optimization.
@@ -116,15 +138,21 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
 
     deviance_ratio_ : ndarray, shape=(n_alphas,)
         The fraction of (null) deviance explained.
+        The deviance is defined as :math:`2 \cdot (\text{loglike_sat} - \text{loglike})`,
+        where `loglike_sat` is the log-likelihood for the saturated model
+        (a model with a free parameter per observation). Null deviance is defined as
+        :math:`2 \cdot (\text{loglike_sat} - \text{loglike(Null)})`;
+        The NULL model is the model with all zero coefficients.
+        Hence, ``deviance_ratio_`` is :math:`1 - \frac{\text{deviance}}{\text{null_deviance}}`.
 
     n_features_in_ : int
         Number of features seen during ``fit``.
 
-    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+    feature_names_in_ : ndarray, shape = (`n_features_in_`,)
         Names of features seen during ``fit``. Defined only when `X`
         has feature names that are all strings.
 
-    unique_times_ : array of shape = (n_unique_times,)
+    unique_times_ : ndarray, shape = (n_unique_times,)
         Unique time points.
 
     References
@@ -178,7 +206,7 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
         self._baseline_models = None
 
     def _pre_fit(self, X, y):
-        X = self._validate_data(X, ensure_min_samples=2, dtype=np.float64, copy=self.copy_X)
+        X = validate_data(self, ensure_eager_dataframe(X), ensure_min_samples=2, dtype=np.float64, copy=self.copy_X)
         event, time = check_array_survival(X, y)
         # center feature matrix
         X_offset = np.average(X, axis=0)
@@ -212,9 +240,6 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
     def _check_alphas(self):
         create_path = self.alphas is None
         if create_path:
-            if self.n_alphas <= 0:
-                raise ValueError("n_alphas must be a positive integer")
-
             alphas = np.empty(int(self.n_alphas), dtype=np.float64)
         else:
             alphas = column_or_1d(self.alphas, warn=True)
@@ -239,29 +264,28 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
 
         alphas, create_path = self._check_alphas()
 
-        if self.max_iter <= 0:
-            raise ValueError("max_iter must be a positive integer")
-
         alpha_min_ratio = self._check_alpha_min_ratio(n_samples, n_features)
 
         return create_path, alphas.astype(np.float64), penalty_factor.astype(np.float64), alpha_min_ratio
 
     def fit(self, X, y):
-        """Fit estimator.
+        """
+        Fit estimator.
 
         Parameters
         ----------
         X : array-like, shape = (n_samples, n_features)
-            Data matrix
+            Data matrix.
 
         y : structured array, shape = (n_samples,)
-            A structured array containing the binary event indicator
-            as first field, and time of event or time of censoring as
-            second field.
+            A structured array with two fields. The first field is a boolean
+            where ``True`` indicates an event and ``False`` indicates right-censoring.
+            The second field is a float with the time of event or time of censoring.
 
         Returns
         -------
-        self
+        object
+            Fitted estimator.
         """
         X, event_num, time, X_offset, X_scale = self._pre_fit(X, y)
         create_path, alphas, penalty, alpha_min_ratio = self._check_params(*X.shape)
@@ -320,8 +344,12 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
         return coef
 
     def _interpolate_coefficients(self, alpha):
-        """Interpolate coefficients by calculating the weighted average of coefficient vectors corresponding to
-        neighbors of alpha in the list of alphas constructed during training."""
+        """
+        Interpolate coefficients.
+
+        Calculate the weighted average of coefficient vectors corresponding to
+        neighbors of alpha in the list of alphas constructed during training.
+        """
         exact = False
         coef_idx = None
         for i, val in enumerate(self.alphas_):
@@ -349,12 +377,18 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
         return coef, offset
 
     def predict(self, X, alpha=None):
-        """The linear predictor of the model.
+        """
+        Predict risk scores.
+
+        The risk score is the linear predictor of the model,
+        computed as the dot product of the input features `X` and the
+        estimated coefficients `coef_`. A higher score indicates a
+        higher risk of experiencing the event.
 
         Parameters
         ----------
         X : array-like, shape = (n_samples, n_features)
-            Test data of which to calculate log-likelihood from
+            Test data of which to calculate log-likelihood from.
 
         alpha : float, optional
             Constant that multiplies the penalty terms. If the same alpha was used during training, exact
@@ -363,10 +397,10 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
 
         Returns
         -------
-        T : array, shape = (n_samples,)
-            The predicted decision function
+        ndarray, shape = (n_samples,)
+            Predicted risk scores.
         """
-        X = self._validate_data(X, reset=False)
+        X = validate_data(self, ensure_eager_dataframe(X), reset=False)
         coef, offset = self._get_coef(alpha)
         return np.dot(X, coef) - offset
 
@@ -388,16 +422,17 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
         return baseline_model
 
     def predict_cumulative_hazard_function(self, X, alpha=None, return_array=False):
-        """Predict cumulative hazard function.
+        r"""
+        Predict cumulative hazard function.
 
         Only available if :meth:`fit` has been called with `fit_baseline_model = True`.
 
         The cumulative hazard function for an individual
-        with feature vector :math:`x_\\alpha` is defined as
+        with feature vector :math:`x_\alpha` is defined as
 
         .. math::
 
-            H(t \\mid x_\\alpha) = \\exp(x_\\alpha^\\top \\beta) H_0(t) ,
+            H(t \mid x_\alpha) = \exp(x_\alpha^\top \beta) H_0(t) ,
 
         where :math:`H_0(t)` is the baseline hazard function,
         estimated by Breslow's estimator.
@@ -411,68 +446,82 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
             Constant that multiplies the penalty terms. The same alpha as used during training
             must be specified. If set to ``None``, the last alpha in the solution path is used.
 
-        return_array : boolean, default: False
-            If set, return an array with the cumulative hazard rate
-            for each `self.unique_times_`, otherwise an array of
-            :class:`sksurv.functions.StepFunction`.
+        return_array : bool, default: False
+            Whether to return a single array of cumulative hazard values
+            or a list of step functions.
+
+            If `False`, a list of :class:`sksurv.functions.StepFunction`
+            objects is returned.
+
+            If `True`, a 2d-array of shape `(n_samples, n_unique_times)` is
+            returned, where `n_unique_times` is the number of unique
+            event times in the training data. Each row represents the cumulative
+            hazard function of an individual evaluated at `unique_times_`.
 
         Returns
         -------
-        cum_hazard : ndarray
-            If `return_array` is set, an array with the cumulative hazard rate
-            for each `self.unique_times_`, otherwise an array of length `n_samples`
-            of :class:`sksurv.functions.StepFunction` instances will be returned.
+        ndarray
+            If `return_array` is `False`, an array of `n_samples`
+            :class:`sksurv.functions.StepFunction` instances is returned.
+
+            If `return_array` is `True`, a numeric array of shape
+            `(n_samples, n_unique_times_)` is returned.
 
         Examples
         --------
-        >>> import matplotlib.pyplot as plt
-        >>> from sksurv.datasets import load_breast_cancer
-        >>> from sksurv.preprocessing import OneHotEncoder
-        >>> from sksurv.linear_model import CoxnetSurvivalAnalysis
+        .. plot::
 
-        Load and prepare the data.
+            >>> import matplotlib.pyplot as plt
+            >>> from sksurv.datasets import load_breast_cancer
+            >>> from sksurv.preprocessing import OneHotEncoder
+            >>> from sksurv.linear_model import CoxnetSurvivalAnalysis
 
-        >>> X, y = load_breast_cancer()
-        >>> X = OneHotEncoder().fit_transform(X)
+            Load and prepare the data.
 
-        Fit the model.
+            >>> X, y = load_breast_cancer()
+            >>> X = OneHotEncoder().fit_transform(X)
 
-        >>> estimator = CoxnetSurvivalAnalysis(l1_ratio=0.99, fit_baseline_model=True)
-        >>> estimator.fit(X, y)
+            Fit the model.
 
-        Estimate the cumulative hazard function for one sample and the five highest alpha.
+            >>> estimator = CoxnetSurvivalAnalysis(
+            ...     l1_ratio=0.99, fit_baseline_model=True
+            ... ).fit(X, y)
 
-        >>> chf_funcs = {}
-        >>> for alpha in estimator.alphas_[:5]:
-        ...     chf_funcs[alpha] = estimator.predict_cumulative_hazard_function(
-        ...         X.iloc[:1], alpha=alpha)
-        ...
+            Estimate the cumulative hazard function for one sample and the five highest alpha.
 
-        Plot the estimated cumulative hazard functions.
+            >>> chf_funcs = {}
+            >>> for alpha in estimator.alphas_[:5]:
+            ...     chf_funcs[alpha] = estimator.predict_cumulative_hazard_function(
+            ...         X.iloc[:1], alpha=alpha)
+            ...
 
-        >>> for alpha, chf_alpha in chf_funcs.items():
-        ...     for fn in chf_alpha:
-        ...         plt.step(fn.x, fn(fn.x), where="post",
-        ...                  label=f"alpha = {alpha:.3f}")
-        ...
-        >>> plt.ylim(0, 1)
-        >>> plt.legend()
-        >>> plt.show()
+            Plot the estimated cumulative hazard functions.
+
+            >>> for alpha, chf_alpha in chf_funcs.items():
+            ...     for fn in chf_alpha:
+            ...         plt.step(fn.x, fn(fn.x), where="post",
+            ...                  label=f"alpha = {alpha:.3f}")
+            ...
+            [...]
+            >>> plt.legend()
+            <matplotlib.legend.Legend object at 0x...>
+            >>> plt.show()  # doctest: +SKIP
         """
         baseline_model = self._get_baseline_model(alpha)
         return self._predict_cumulative_hazard_function(baseline_model, self.predict(X, alpha=alpha), return_array)
 
     def predict_survival_function(self, X, alpha=None, return_array=False):
-        """Predict survival function.
+        r"""
+        Predict survival function.
 
         Only available if :meth:`fit` has been called with `fit_baseline_model = True`.
 
         The survival function for an individual
-        with feature vector :math:`x_\\alpha` is defined as
+        with feature vector :math:`x_\alpha` is defined as
 
         .. math::
 
-            S(t \\mid x_\\alpha) = S_0(t)^{\\exp(x_\\alpha^\\top \\beta)} ,
+            S(t \mid x_\alpha) = S_0(t)^{\exp(x_\alpha^\top \beta)} ,
 
         where :math:`S_0(t)` is the baseline survival function,
         estimated by Breslow's estimator.
@@ -486,54 +535,68 @@ class CoxnetSurvivalAnalysis(BaseEstimator, SurvivalAnalysisMixin):
             Constant that multiplies the penalty terms. The same alpha as used during training
             must be specified. If set to ``None``, the last alpha in the solution path is used.
 
-        return_array : boolean, default: False
-            If set, return an array with the probability
-            of survival for each `self.unique_times_`,
-            otherwise an array of :class:`sksurv.functions.StepFunction`.
+        return_array : bool, default: False
+            Whether to return a single array of survival probabilities
+            or a list of step functions.
+
+            If `False`, a list of :class:`sksurv.functions.StepFunction`
+            objects is returned.
+
+            If `True`, a 2d-array of shape `(n_samples, n_unique_times)` is
+            returned, where `n_unique_times` is the number of unique
+            event times in the training data. Each row represents the survival
+            function of an individual evaluated at `unique_times_`.
 
         Returns
         -------
-        survival : ndarray
-            If `return_array` is set, an array with the probability of
-            survival for each `self.unique_times_`, otherwise an array of
-            length `n_samples` of :class:`sksurv.functions.StepFunction`
-            instances will be returned.
+        ndarray
+            If `return_array` is `False`, an array of `n_samples`
+            :class:`sksurv.functions.StepFunction` instances is returned.
+
+            If `return_array` is `True`, a numeric array of shape
+            `(n_samples, n_unique_times_)` is returned.
 
         Examples
         --------
-        >>> import matplotlib.pyplot as plt
-        >>> from sksurv.datasets import load_breast_cancer
-        >>> from sksurv.preprocessing import OneHotEncoder
-        >>> from sksurv.linear_model import CoxnetSurvivalAnalysis
+        .. plot::
 
-        Load and prepare the data.
+            >>> import matplotlib.pyplot as plt
+            >>> from sksurv.datasets import load_breast_cancer
+            >>> from sksurv.preprocessing import OneHotEncoder
+            >>> from sksurv.linear_model import CoxnetSurvivalAnalysis
 
-        >>> X, y = load_breast_cancer()
-        >>> X = OneHotEncoder().fit_transform(X)
+            Load and prepare the data.
 
-        Fit the model.
+            >>> X, y = load_breast_cancer()
+            >>> X = OneHotEncoder().fit_transform(X)
 
-        >>> estimator = CoxnetSurvivalAnalysis(l1_ratio=0.99, fit_baseline_model=True)
-        >>> estimator.fit(X, y)
+            Fit the model.
 
-        Estimate the survival function for one sample and the five highest alpha.
+            >>> estimator = CoxnetSurvivalAnalysis(
+            ...     l1_ratio=0.99, fit_baseline_model=True
+            ... ).fit(X, y)
 
-        >>> surv_funcs = {}
-        >>> for alpha in estimator.alphas_[:5]:
-        ...     surv_funcs[alpha] = estimator.predict_survival_function(
-        ...         X.iloc[:1], alpha=alpha)
-        ...
+            Estimate the survival function for one sample and the five highest alpha.
 
-        Plot the estimated survival functions.
+            >>> surv_funcs = {}
+            >>> for alpha in estimator.alphas_[:5]:
+            ...     surv_funcs[alpha] = estimator.predict_survival_function(
+            ...         X.iloc[:1], alpha=alpha)
+            ...
 
-        >>> for alpha, surv_alpha in surv_funcs.items():
-        ...     for fn in surv_alpha:
-        ...         plt.step(fn.x, fn(fn.x), where="post",
-        ...                  label=f"alpha = {alpha:.3f}")
-        ...
-        >>> plt.ylim(0, 1)
-        >>> plt.legend()
-        >>> plt.show()
+            Plot the estimated survival functions.
+
+            >>> for alpha, surv_alpha in surv_funcs.items():
+            ...     for fn in surv_alpha:
+            ...         plt.step(fn.x, fn(fn.x), where="post",
+            ...                  label=f"alpha = {alpha:.3f}")
+            ...
+            [...]
+            >>> plt.ylim(0, 1)
+            (0.0, 1.0)
+            >>> plt.legend()
+            <matplotlib.legend.Legend object at 0x...>
+            >>> plt.show()  # doctest: +SKIP
         """
         baseline_model = self._get_baseline_model(alpha)
         return self._predict_survival_function(baseline_model, self.predict(X, alpha=alpha), return_array)
